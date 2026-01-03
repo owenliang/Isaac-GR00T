@@ -281,6 +281,17 @@ def to_json_serializable(obj: Any) -> Any:
 def parse_modality_configs(
     modality_configs: dict[str, dict[str, ModalityConfig]],
 ) -> dict[str, dict[str, ModalityConfig]]:
+    """Parse nested modality config dicts into ModalityConfig objects.
+    【中文】解析 `embodiment_configs.py` 中的模态配置结构：
+    【中文】- 外层 key: 具身形态标签（如 "unitree_g1"、"libero_panda"）
+    【中文】- 内层 key: 模态名称（"video" / "state" / "action" / "language" 等）
+    【中文】- 内层 value: 若为 dict，则用 ModalityConfig(**config) 构造成对象；否则直接使用现有 ModalityConfig
+    【中文】典型字段包括：
+    【中文】- delta_indices: 时间维索引（哪些时间步参与该模态）
+    【中文】- modality_keys: 该模态下的信号名称列表（例如各关节、图像视角）
+    【中文】- action_configs: 对每个动作子模态的表示方式（绝对/相对、EEF/非EEF、格式等）
+    【中文】- mean_std_embedding_keys: 参与统计均值/方差的子模态名称
+    """
     parsed_modality_configs = {}
     for embodiment_tag, modality_config in modality_configs.items():
         parsed_modality_configs[embodiment_tag] = {}

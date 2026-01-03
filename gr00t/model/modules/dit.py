@@ -1,3 +1,6 @@
+# Diffusion Transformer (DiT) 实现
+# 用于 Gr00t N1.6 的扩散动作头，支持交叉注意力融合视觉-语言特征
+
 from typing import Optional
 
 from diffusers import ConfigMixin, ModelMixin
@@ -10,6 +13,10 @@ import torch.nn.functional as F
 
 
 class TimestepEncoder(nn.Module):
+    """
+    时间步编码器：将离散时间步编码为连续嵌入向量。
+    使用正弦位置编码 + MLP 投影。
+    """
     def __init__(self, embedding_dim, compute_dtype=torch.float32):
         super().__init__()
         self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=1)
@@ -23,6 +30,10 @@ class TimestepEncoder(nn.Module):
 
 
 class AdaLayerNorm(nn.Module):
+    """
+    自适应LayerNorm：根据时间步嵌入调整归一化的scale和shift。
+    用于条件扩散模型中的时间步调制。
+    """
     def __init__(
         self,
         embedding_dim: int,
@@ -49,6 +60,10 @@ class AdaLayerNorm(nn.Module):
 
 
 class BasicTransformerBlock(nn.Module):
+    """
+    Transformer基础块：包含自注意力、交叉注意力（可选）、前馈网络。
+    支持AdaLayerNorm用于时间步条件化。
+    """
     def __init__(
         self,
         dim: int,
@@ -95,8 +110,8 @@ class BasicTransformerBlock(nn.Module):
         else:
             self.pos_embed = None
 
-        # Define 3 blocks. Each block has its own normalization layer.
-        # 1. Self-Attn
+        # 定义3个主要模块：自注意力、交叉注意力（隐含）、前馈网络
+        # 1. 自注意力
         if norm_type == "ada_norm":
             self.norm1 = AdaLayerNorm(dim)
         else:
@@ -113,7 +128,7 @@ class BasicTransformerBlock(nn.Module):
             out_bias=attention_out_bias,
         )
 
-        # 3. Feed-forward
+        # 3. 前馈网络
         self.norm3 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
         self.ff = FeedForward(
             dim,
@@ -136,7 +151,7 @@ class BasicTransformerBlock(nn.Module):
         encoder_attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
-        # 0. Self-Attention
+        # 0. 自注意力（或交叉注意力，如果提供了encoder_hidden_states）
         if self.norm_type == "ada_norm":
             norm_hidden_states = self.norm1(hidden_states, temb)
         else:
@@ -159,7 +174,7 @@ class BasicTransformerBlock(nn.Module):
         if hidden_states.ndim == 4:
             hidden_states = hidden_states.squeeze(1)
 
-        # 4. Feed-forward
+        # 4. 前馈网络
         norm_hidden_states = self.norm3(hidden_states)
         ff_output = self.ff(norm_hidden_states)
 
@@ -170,6 +185,15 @@ class BasicTransformerBlock(nn.Module):
 
 
 class DiT(ModelMixin, ConfigMixin):
+    """
+    Diffusion Transformer：用于扩散模型的Transformer架构。
+    
+    关键特性：
+    - 自注意力：处理state+action序列
+    - 交叉注意力：融合vision-language特征
+    - AdaLayerNorm：时间步条件化
+    - 支持梯度检查点以节省显存
+    """
     _supports_gradient_checkpointing = True
 
     @register_to_config

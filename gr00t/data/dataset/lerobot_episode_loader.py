@@ -14,6 +14,10 @@ providing episode-level data access with support for multi-modal data including:
 - Language instructions/annotations
 
 Returns messages with VLAStepData as defined in types.py.
+
+【中文】LeRobot 数据集加载器，提供从 LeRobot 格式数据集中按 episode 加载多模态数据的核心能力。
+【中文】负责：解析元数据（info/episodes/tasks/modality/stats）、解码多路相机视频、按配置切出 state/action 关节组，
+【中文】并以与 VLA 训练流水线兼容的形式（DataFrame + VLAStepData）暴露给上层数据集与 Processor 使用。
 """
 
 from collections import defaultdict
@@ -94,6 +98,11 @@ class LeRobotEpisodeLoader:
         ...     },
         ... )
         >>> episode_data = loader[0]  # Load first episode as DataFrame
+
+    【中文】面向 LeRobot 格式数据集的“episode 级”加载器，是上层所有数据集类的基础。
+    【中文】通过解析 meta 目录中的 info/episodes/tasks/modality/stats 等文件，
+    【中文】再按给定的 ModalityConfig 从 parquet + 视频文件中抽取出 video/state/action/language，
+    【中文】最终返回一个按时间步排列的 DataFrame，每列对应一个模态下的关节组或视角（如 state.left_arm, action.left_arm, video.ego_view）。
     """
 
     def __init__(
@@ -110,6 +119,11 @@ class LeRobotEpisodeLoader:
         1. Loading all metadata files from the dataset
         2. Parsing and validating modality configurations
         3. Computing effective episode lengths based on action horizon
+
+        【中文】初始化 episode 级加载器：
+        【中文】1）加载并解析 meta 目录中的所有元数据文件（info/episodes/tasks/modality/stats 等）；
+        【中文】2）根据传入的 modality_configs 校验/补全各模态配置；
+        【中文】3）预先计算每个 episode 的长度，为后续分片/采样提供基础信息。
         """
         self.dataset_path = Path(dataset_path)
         self.video_backend = video_backend
@@ -137,6 +151,13 @@ class LeRobotEpisodeLoader:
         - tasks.jsonl: Task descriptions and mappings
         - modality.json: Modality structure and data layout
         - stats.json: Dataset statistics for normalization
+
+        【中文】从 meta 目录加载并解析 LeRobot 标准元数据：
+        【中文】- info.json：数据集整体配置（路径模板、chunk 大小、fps 等）；
+        【中文】- episodes.jsonl：每条 episode 的长度、索引等信息；
+        【中文】- tasks.jsonl：任务 id → 文本描述的映射；
+        【中文】- modality.json：各模态键在原始数组中的切片范围（start/end）；
+        【中文】- stats.json / relative_stats.json：数值模态的统计量（用于归一化），并挂到 self.stats 上。
         """
         meta_dir = self.dataset_path / LEROBOT_META_DIR_NAME
 
@@ -219,6 +240,11 @@ class LeRobotEpisodeLoader:
         Raises:
             ValueError: If invalid modalities are specified
             AssertionError: If language modality configuration is invalid
+
+        【中文】校验并标准化传入的各模态配置：
+        【中文】- 检查模态名是否合法（限制在 video/state/action/language）；
+        【中文】- 对 language 模态施加额外约束：必须只有一个 key，且只能采样单步（delta_indices=[0]）。
+        【中文】这里不主动生成默认配置，只是做合法性检查并返回整理后的配置。
         """
         # Validate all modality configurations
         for modality in modality_configs:
@@ -258,6 +284,9 @@ class LeRobotEpisodeLoader:
 
         Returns:
             DataFrame with columns for each requested joint group containing sliced arrays
+
+        【中文】根据 modality.json 中记录的 start/end 信息，从原始数组列中切出指定的关节组。
+        【中文】例如：从 observation.state 中切出 left_arm/right_arm 等子向量，并以列名为 group_name 写入新的 DataFrame。
         """
         modality_info = self.modality_meta.get(modality_type, {})
         joint_data = pd.DataFrame()
@@ -294,6 +323,11 @@ class LeRobotEpisodeLoader:
 
         Returns:
             Processed DataFrame with all modality data
+
+        【中文】加载单个 episode 对应的 parquet 文件，并完成数值/语言模态的预处理：
+        【中文】1）按 chunk_size 计算所在 parquet 文件并读取原始 DataFrame；
+        【中文】2）若配置了 language，则将任务 id 映射为可读文本，生成 language.xxx 列；
+        【中文】3）调用 _extract_joint_groups 将 state/action 的大数组拆成多个关节组列，例如 state.left_arm、action.left_arm。
         """
         # Load raw parquet data using chunking pattern
         chunk_idx = episode_index // self.chunk_size
@@ -304,33 +338,52 @@ class LeRobotEpisodeLoader:
         original_df = pd.read_parquet(parquet_path)
         loaded_df = pd.DataFrame()
 
+
+        # 处理语言标注（将任务索引转换为任务字符串）
         # Process language annotations (convert task indices to task strings)
         if "language" in self.modality_configs:
             for key in self.modality_configs["language"].modality_keys:
+                # 这些键将从 episodes.jsonl 中单独加载
                 # these keys will be loaded separately from episodes.jsonl
                 if key in LANG_KEYS:
                     continue
+                # 确保键以 "annotation." 开头
                 assert key.startswith("annotation.")
+                # 提取子键（去除 "annotation." 前缀）
                 subkey = key.replace("annotation.", "")
+                # 验证子键存在于模态元数据中
                 assert subkey in self.modality_meta["annotation"], (
                     f"Key {subkey} not found in language modality"
                 )
+                # 获取原始键名，如果未指定则使用当前键
                 original_key = self.modality_meta["annotation"][subkey].get("original_key", key)
+                # 将任务索引映射为对应的任务描述文本
                 loaded_df[f"language.{key}"] = original_df[original_key].apply(
                     lambda x: self.tasks_map[x]
                 )
 
+
+        # 针对 state 和 action 模态，提取对应的关节组数据
         # Extract joint groups for state and action modalities
         for modality_type in ["state", "action"]:
+            # 如果当前模态类型未在配置中，跳过处理
+            # Skip if current modality type is not configured
             if modality_type not in self.modality_configs:
                 continue
+            # 调用 _extract_joint_groups 方法，根据配置的关节组键从原始 DataFrame 中提取数据
+            # Call _extract_joint_groups to extract data from original DataFrame based on configured joint group keys
             joint_groups_df = self._extract_joint_groups(
                 original_df, self.modality_configs[modality_type].modality_keys, modality_type
             )
+            # 遍历提取出的关节组，将每个关节组数据作为新列添加到 loaded_df 中
+            # 列名格式为: {modality_type}.{joint_group}，例如 "state.left_arm" 或 "action.gripper"
+            # Iterate through extracted joint groups, add each as a new column to loaded_df
+            # Column naming format: {modality_type}.{joint_group}, e.g., "state.left_arm" or "action.gripper"
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
 
         return loaded_df
+
 
     def _load_video_data(self, episode_index: int, indices: np.ndarray) -> dict[str, np.ndarray]:
         """
@@ -345,30 +398,49 @@ class LeRobotEpisodeLoader:
 
         Returns:
             Dictionary mapping camera view names to arrays of decoded frames
+
+        【中文】按给定的时间步索引，从对应视频文件中解码各相机视角的帧：
+        【中文】- 使用 modality.json 中的 original_key 与 info.json 中的 data_path/video_path 模板定位视频文件；
+        【中文】- 调用 get_frames_by_indices 按 indices 抽帧，返回一个 {camera_name: np.ndarray[...] } 的字典。
         """
+        # 初始化空字典用于存储视频数据
+        # Initialize empty dictionary to store video data
         video_data = {}
 
+        # 如果没有配置视频路径模式或视频模态，直接返回空字典
+        # Return empty dict if no video path pattern or video modality configured
         if not self.video_path_pattern or "video" not in self.modality_configs:
             return video_data
 
+        # 计算当前 episode 所在的 chunk 索引
+        # Calculate chunk index for current episode
         chunk_idx = episode_index // self.chunk_size
+        # 获取配置的所有图像键（相机视角）
+        # Get all configured image keys (camera views)
         image_keys = self.modality_configs["video"].modality_keys
 
+        # 遍历每个图像键，加载对应的视频数据
+        # Iterate through each image key to load corresponding video data
         for image_key in image_keys:
+            # 解析视频文件命名中使用的原始键名
             # Resolve the original key used in video file naming
             original_key = self.modality_meta["video"][image_key].get(
                 "original_key", f"observation.images.{image_key}"
             )
+            # 确保原始键存在于特征配置中
+            # Ensure original key exists in feature config
             assert original_key in self.feature_config, (
                 f"Original key {original_key} not found in feature config"
             )
 
+            # 使用路径模板构造视频文件路径
             # Construct video file path using pattern
             video_filename = self.video_path_pattern.format(
                 episode_chunk=chunk_idx, video_key=original_key, episode_index=episode_index
             )
             video_path = self.dataset_path / video_filename
 
+            # 在指定的时间戳索引处解码视频帧
             # Decode video frames at specified timestamps
             video_data[image_key] = get_frames_by_indices(
                 str(video_path),
@@ -389,6 +461,10 @@ class LeRobotEpisodeLoader:
 
         Returns:
             Nested dictionary: {modality: {joint_group: {stat_type: values}}}
+
+        【中文】从 self.stats 中抽取指定模态/关节组对应的统计量（mean/std/min/max/q01/q99），
+        【中文】根据 modality.json 中记录的 start/end 切片到各关节组维度，并组织成嵌套字典返回，
+        【中文】供上层 Processor/StateActionProcessor 做归一化和裁剪使用；同时若存在 relative_action 统计，也一并挂到返回值中。
         """
         mapping = {"state": "observation.state", "action": "action"}
         dataset_statistics = _rec_defaultdict()
@@ -457,6 +533,13 @@ class LeRobotEpisodeLoader:
 
         Raises:
             IndexError: If episode index is out of bounds
+
+        【中文】按 episode 索引加载完整一条轨迹，并整合数值模态 + 语言 + 视频：
+        【中文】1）根据 episodes_metadata 中记录的 episode_index 找到对应 parquet 和视频文件；
+        【中文】2）调用 _load_parquet_data 构造 state.xxx / action.xxx / language.xxx 列；
+        【中文】3）如需语言，通过 create_language_from_meta 基于 meta 生成逐帧文本；
+        【中文】4）调用 _load_video_data 解码同步的视频帧，填入 video.xxx 列；
+        【中文】最终返回一个按时间步排列的 DataFrame，每行对应一个时间步，列包含所有已配置模态。
         """
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Episode index {idx} out of bounds")
@@ -496,6 +579,9 @@ class LeRobotEpisodeLoader:
 
         Returns:
             List containing initial action dictionaries, or empty list if not available
+
+        【中文】可选地从 meta/initial_actions.json 中加载“初始动作”配置，
+        【中文】用于部署或策略初始化阶段为机器人提供一个安全/合理的起始动作（例如站姿或初始关节配置）。
         """
         meta_dirpath = self.dataset_path / LEROBOT_META_DIR_NAME
         initial_actions_path = meta_dirpath / INITIAL_ACTIONS_FILENAME

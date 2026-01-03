@@ -1,3 +1,6 @@
+# DatasetFactory: 数据集构建工厂类
+# 负责创建 shard-based 的混合数据集，支持多数据集按比例混合
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -12,7 +15,11 @@ from gr00t.data.stats import generate_rel_stats, generate_stats
 
 class DatasetFactory:
     """
-    Factory class for building training datasets. Model-agnostic.
+    数据集构建工厂。与模型无关。
+    关键特性：
+    - 支持多数据集按 mix_ratio 混合
+    - 使用 shard-based 加载，内存高效
+    - 自动生成统计信息（绝对值和相对值）
     """
 
     def __init__(self, config: Config):
@@ -21,13 +28,18 @@ class DatasetFactory:
     def build(
         self, processor: BaseProcessor
     ) -> tuple[ShardedMixtureDataset, ShardedMixtureDataset | None]:
-        """Build the dataset. Returns a tuple of (train_dataset, eval_dataset)."""
+        """
+        构建训练数据集。
+        返回：(train_dataset, eval_dataset)
+        注意：Shard-based 数据集不支持评估集，eval_dataset 总是 None
+        """
         assert self.config.training.eval_strategy == "no", (
             "Sharded dataset does not support evaluation sets"
         )
 
         all_datasets = []
         all_weights = []
+        # 遍历所有数据集配置，构建单个数据集
         for dataset_spec in tqdm(
             self.config.data.datasets,
             total=len(self.config.data.datasets),
@@ -38,6 +50,7 @@ class DatasetFactory:
                 embodiment_tag = dataset_spec.embodiment_tag
                 assert embodiment_tag is not None, "Embodiment tag is required"
                 assert self.config.data.mode == "single_turn", "Only single turn mode is supported"
+                # 生成统计信息（仅主进程，分布式时同步）
                 if torch.distributed.is_initialized():
                     if torch.distributed.get_rank() == 0:
                         generate_stats(dataset_path)
@@ -45,7 +58,8 @@ class DatasetFactory:
                 else:
                     generate_stats(dataset_path)
                     generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
-                torch.distributed.barrier()
+                torch.distributed.barrier()  # 等待所有进程生成完成
+                # 创建 shard-based 单步数据集
                 dataset = ShardedSingleStepDataset(
                     dataset_path=dataset_path,
                     embodiment_tag=EmbodimentTag(embodiment_tag),
@@ -57,6 +71,7 @@ class DatasetFactory:
                     allow_padding=self.config.data.allow_padding,
                 )
                 datasets.append(dataset)
+            # 根据数据集长度和 mix_ratio 计算权重
             dataset_lengths = np.array([len(dataset) for dataset in datasets])
             dataset_relative_lengths = dataset_lengths / dataset_lengths.sum()
             for dataset, relative_length in zip(datasets, dataset_relative_lengths):
@@ -64,6 +79,7 @@ class DatasetFactory:
                 all_datasets.append(dataset)
                 all_weights.append(weight)
 
+        # 创建混合数据集（按权重采样）
         return (
             ShardedMixtureDataset(
                 datasets=all_datasets,

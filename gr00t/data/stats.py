@@ -115,39 +115,57 @@ def generate_stats(dataset_path: Path | str):
 
 
 class RelativeActionLoader:
+    """Loader for computing relative action trajectories for a single joint group.
+    【中文】从 LeRobot episode 数据中抽取指定 action 关节组的相对动作轨迹，用于后续统计/归一化。
+    """
+
     def __init__(self, dataset_path: Path | str, embodiment_tag: EmbodimentTag, action_key: str):
         self.dataset_path = Path(dataset_path)
         self.modality_configs: dict[str, ModalityConfig] = {}
         self.action_key = action_key
         # Check action config
+        # 【中文】根据具身形态和 action_key 找到对应的 ActionConfig（表示方式、类型、格式等）
         assert action_key in MODALITY_CONFIGS[embodiment_tag.value]["action"].modality_keys
         idx = MODALITY_CONFIGS[embodiment_tag.value]["action"].modality_keys.index(action_key)
         action_configs = MODALITY_CONFIGS[embodiment_tag.value]["action"].action_configs
         assert action_configs is not None, MODALITY_CONFIGS[embodiment_tag.value]["action"]
         self.action_config = action_configs[idx]
+        # 【中文】只保留当前 action_key 的 ModalityConfig，形成一个简化版的 action 配置
         self.modality_configs["action"] = ModalityConfig(
             delta_indices=MODALITY_CONFIGS[embodiment_tag.value]["action"].delta_indices,
             modality_keys=[action_key],
         )
         # Check state config
+        # 【中文】某些动作可以指定单独的 state_key，否则默认与 action_key 同名
         state_key = self.action_config.state_key or action_key
         assert state_key in MODALITY_CONFIGS[embodiment_tag.value]["state"].modality_keys
+        # 【中文】只保留对应 state_key 的 ModalityConfig，用于取参考状态
         self.modality_configs["state"] = ModalityConfig(
             delta_indices=MODALITY_CONFIGS[embodiment_tag.value]["state"].delta_indices,
             modality_keys=[state_key],
         )
         # Check state-action consistency
+        # 【中文】保证 state 的最后一个时间索引 == action 序列的第一个时间索引，方便滑动窗口对齐
         assert (
             self.modality_configs["state"].delta_indices[-1]
             == self.modality_configs["action"].delta_indices[0]
         )
+        # 【中文】底层使用 LeRobotEpisodeLoader 逐 episode 加载 DataFrame（state/action/video 等列）
         self.loader = LeRobotEpisodeLoader(dataset_path, self.modality_configs)
 
     def load_relative_actions(self, trajectory_id: int) -> list[np.ndarray]:
+        """Load relative actions for a single episode.
+
+        【中文】对单个 episode：
+        1. 读取 state 与 action 序列
+        2. 以某一时刻的 state 作为参考
+        3. 取一段 action horizon，并在关节/EEF 空间内减去参考，得到相对动作轨迹
+        """
         df = self.loader[trajectory_id]
 
         # OPTIMIZATION: Extract columns once and convert to numpy arrays
         # This eliminates repeated DataFrame.__getitem__ and Series.__getitem__ calls
+        # 【中文】构造用于访问 DataFrame 的列名：state.xxx / action.xxx
         if self.action_config.state_key is not None:
             state_key = f"state.{self.action_config.state_key}"
         else:
@@ -155,13 +173,17 @@ class RelativeActionLoader:
         action_key = f"action.{self.action_key}"
 
         # Convert to numpy arrays once - this is much faster than repeated pandas access
+        # 【中文】DataFrame 中每行是一帧，单元格是一个关节向量；这里取出整条 episode 的数组表示
         state_data = df[state_key].values  # Shape: (episode_length, joint_dim)
         action_data = df[action_key].values  # Shape: (episode_length, joint_dim)
         trajectories = []
+        # 【中文】可用起点数 = 总步数 - action horizon 最大偏移，后面会做滑动窗口遍历
         usable_length = len(df) - self.modality_configs["action"].delta_indices[-1]
         action_delta_indices = np.array(self.modality_configs["action"].delta_indices)
         for i in range(usable_length):
+            # 【中文】state_ind：当前窗口参考状态所在的时间步索引
             state_ind = self.modality_configs["state"].delta_indices[-1] + i
+            # 【中文】action_inds：当前窗口内 action 的时间步索引（如 i..i+29）
             action_inds = action_delta_indices + i
             last_state = state_data[state_ind]
             actions = action_data[action_inds]
@@ -170,6 +192,7 @@ class RelativeActionLoader:
                 assert len(last_state) == 9  # xyz + rot6d
                 assert actions.shape[1] == 9  # xyz + rot6d
 
+                # 【中文】EEF 类型：在末端执行器 (xyz+rotation) 空间中计算相对轨迹
                 reference_frame = EndEffectorPose(
                     translation=last_state[:3],
                     rotation=last_state[3:],
@@ -187,16 +210,19 @@ class RelativeActionLoader:
                     "EEF action is not yet supported, need to handle rotation transformation based on action format"
                 )
             elif self.action_config.type == ActionType.NON_EEF:
+                # 【中文】关节空间类型：把 state / action 都看作关节姿态，用减法得到相对关节位移轨迹
                 reference_frame = JointPose(last_state)
                 traj = JointActionChunk([JointPose(m) for m in actions]).relative_chunking(
                     reference_frame=reference_frame
                 )
+                # 【中文】将 JointPose 序列堆成 (horizon, joint_dim) 的数组，并加入结果列表
                 trajectories.append(np.stack([p.joints for p in traj.poses], dtype=np.float32))
             else:
                 raise ValueError(f"Unknown ActionType: {self.action_config.type}")
         return trajectories
 
     def __len__(self) -> int:
+        # 【中文】返回 episode 数量，使 loader 可以被 len() 调用
         return len(self.loader)
 
 
@@ -222,27 +248,46 @@ def calculate_stats_for_key(
     }
 
 
+
 def generate_rel_stats(dataset_path: Path | str, embodiment_tag: EmbodimentTag) -> None:
+    """生成相对动作统计信息。
+    
+    【中文】为指定的数据集和具身形态生成相对动作的统计信息（min, max, mean, std, q01, q99）。
+    仅处理配置为 RELATIVE 表示的动作关节组，统计结果保存到 meta/relative_stats.json。
+    
+    Args:
+        dataset_path: 数据集路径
+        embodiment_tag: 具身形态标签，用于从配置中加载对应的模态设置
+    """
     dataset_path = Path(dataset_path)
+    # 【中文】获取当前具身形态的 action 配置
     action_config = MODALITY_CONFIGS[embodiment_tag.value]["action"]
+    # 【中文】如果没有配置 action_configs，直接返回（无需计算相对统计）
     if action_config.action_configs is None:
         return
+    # 【中文】筛选出需要计算相对统计的 action_key（rep == RELATIVE）
     action_keys = [
         key
         for key, action_config in zip(action_config.modality_keys, action_config.action_configs)
         if action_config.rep == ActionRepresentation.RELATIVE
     ]
+    # 【中文】相对统计信息文件路径
     stats_path = Path(dataset_path) / LE_ROBOT_REL_STATS_FILENAME
+    # 【中文】如果统计文件已存在，则加载已有的统计信息
     if stats_path.exists():
         with open(stats_path, "r") as f:
             stats = json.load(f)
     else:
         stats = {}
+    # 【中文】按字母顺序遍历需要计算的 action_key
     for action_key in sorted(action_keys):
+        # 【中文】如果该 key 的统计已存在，跳过计算
         if action_key in stats:
             continue
         print(f"Generating relative stats for {dataset_path} {embodiment_tag} {action_key}")
+        # 【中文】计算该 key 的相对动作统计信息（min, max, mean, std, q01, q99）
         stats[action_key] = calculate_stats_for_key(dataset_path, embodiment_tag, action_key)
+    # 【中文】将统计信息转换为 JSON 可序列化格式并保存到文件
     with open(stats_path, "w") as f:
         json.dump(to_json_serializable(dict(stats)), f, indent=4)
 

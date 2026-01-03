@@ -186,6 +186,10 @@ class JointPose(Pose):
         joint1 = JointPose([0.0, 0.5, 1.0])
         joint2 = JointPose([0.1, 0.6, 1.2])
         relative = joint2 - joint1  # [0.1, 0.1, 0.2]
+
+    【中文】关节空间下的位姿表示类，用一个向量保存机器人各关节的角度/位置。
+    【中文】与末端位姿不同，JointPose 描述的是整个关节链在关节空间中的构型，可用于：
+    【中文】1）直接表示当前关节角配置；2）两帧相减得到相对关节位移；3）作为相对轨迹的参考帧。
     """
 
     pose_type = "joint"
@@ -248,6 +252,9 @@ class JointPose(Pose):
 
         Raises:
             ValueError: If joint dimensions don't match
+
+        【中文】计算当前关节姿态相对于参考姿态的“关节位移”：self - other。
+        【中文】要求两者关节维度一致，否则抛出异常；结果仍然是一个 JointPose，可继续参与后续运算。
         """
         if len(self.joints) != len(other.joints):
             raise ValueError(
