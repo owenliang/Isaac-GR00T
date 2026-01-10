@@ -18,6 +18,12 @@ class ActionChunk(Generic[PoseType]):
     This class provides common functionality for different action chunking types
     including relative and delta action chunking computation with optional reference frames,
     interpolation, and format conversion.
+
+    【中文】机器人动作片段（trajectory chunk）的抽象基类：
+    【中文】- 以一串 Pose（关节或末端位姿）描述一个动作片段；
+    【中文】- 提供公共的相对动作/增量动作计算（相对于参考帧或前一帧）；
+    【中文】- 支持按时间戳插值、以及将内部表示转换为不同的动作数值格式；
+    【中文】具体的关节空间 / 末端空间动作片段由子类 JointActionChunk 和 EndEffectorActionChunk 实现。
     """
 
     def __init__(
@@ -35,6 +41,12 @@ class ActionChunk(Generic[PoseType]):
 
         Raises:
             ValueError: If action chunking is empty or times length doesn't match poses
+
+        【中文】从一串位姿构造动作片段：
+        【中文】- poses: 一系列按时间排序的 Pose（JointPose 或 EndEffectorPose）；
+        【中文】- times: 对应的时间戳序列，若省略则默认从 0 开始、步长为 1.0 的均匀时间轴；
+        【中文】- 若 poses 为空或 times 长度与 poses 不匹配，会抛出 ValueError；
+        【中文】时间戳用于插值和对齐，不影响相对/增量运算的几何意义。
         """
         if not poses:
             raise ValueError("ActionChunk must contain at least one pose")
@@ -51,17 +63,30 @@ class ActionChunk(Generic[PoseType]):
 
     @property
     def poses(self) -> List[PoseType]:
-        """Get the list of poses"""
+        """Get the list of poses.
+
+        【中文】返回动作片段内部保存的位姿列表：
+        【中文】- 返回值是内部列表的浅拷贝，避免外部直接修改内部状态；
+        【中文】- 每个元素都是 JointPose 或 EndEffectorPose，取决于具体子类。
+        """
         return self._poses.copy()
 
     @property
     def times(self) -> NDArray[np.float64]:
-        """Get the timestamps"""
+        """Get the timestamps.
+
+        【中文】返回与每个位姿对应的时间戳数组：
+        【中文】- 通常用于插值或与真实时间对齐；
+        【中文】- 同样返回的是拷贝，防止外部修改内部缓存。
+        """
         return self._times.copy()
 
     @property
     def num_poses(self) -> int:
-        """Get the number of poses in the action chunking"""
+        """Get the number of poses in the action chunking.
+
+        【中文】返回当前动作片段包含的位姿数量，即时间步骤数 N。
+        """
         return len(self._poses)
 
     def relative_chunking(
@@ -78,6 +103,12 @@ class ActionChunk(Generic[PoseType]):
 
         Returns:
             A new ActionChunk of the same type where all poses are relative to the reference frame.
+
+        【中文】计算“相对于某个参考位姿”的相对动作轨迹：
+        【中文】- 若未提供 reference_frame，则默认以轨迹中第一帧为参考；
+        【中文】- 对每个 pose 计算 `pose - ref_pose`，得到一条以参考帧为原点的相对轨迹；
+        【中文】- 对 JointActionChunk 来说是关节差值，对 EndEffectorActionChunk 则是相对位姿变换；
+        【中文】返回新的同类型 ActionChunk，不修改原始轨迹。
         """
         if not self._poses:
             return self.__class__([], times=[])
@@ -107,6 +138,11 @@ class ActionChunk(Generic[PoseType]):
 
         Returns:
             A new ActionChunk of the same type where each pose is relative to the previous pose.
+
+        【中文】计算“逐帧增量”形式的动作轨迹（delta 轨迹）：
+        【中文】- 若提供 reference_frame，则第一帧增量为 pose[0] - reference_frame；
+        【中文】- 否则第一帧增量为 pose[0] - pose[0]，得到零位姿，其后每一帧为当前帧相对上一帧的差值；
+        【中文】- 常用于将绝对轨迹变为“速度/增量”形式，便于学习局部变化或做数值稳定处理。
         """
         if not self._poses:
             return self.__class__([], times=[])
@@ -141,6 +177,11 @@ class ActionChunk(Generic[PoseType]):
 
         Raises:
             NotImplementedError: Must be implemented by subclasses
+
+        【中文】将“相对轨迹”还原为“绝对轨迹”的逆操作：
+        【中文】- 以 reference_frame 作为基准，将每一帧的相对位姿叠加回去，得到绝对位姿；
+        【中文】- 具体叠加方式（关节相加 / 齐次矩阵相乘）由子类实现；
+        【中文】通常与 `relative_chunking` 成对使用，用于在相对/绝对表示之间来回切换。
         """
         raise NotImplementedError("Subclasses must implement to_absolute_chunking")
 
@@ -157,6 +198,11 @@ class ActionChunk(Generic[PoseType]):
 
         Returns:
             A new ActionChunk with interpolated poses
+
+        【中文】对动作轨迹做插值，生成中间位姿：
+        【中文】- 子类可选择不同的插值策略：关节空间用线性插值，末端位姿用线性 + SLERP 等；
+        【中文】- 可通过 num_points 指定需要的均匀采样点数，或直接给定特定时间戳 times；
+        【中文】插值结果仍然是同类型的 ActionChunk，不会修改原始轨迹。
         """
         raise NotImplementedError("Subclasses must implement interpolate")
 
@@ -173,15 +219,26 @@ class ActionChunk(Generic[PoseType]):
 
         Raises:
             NotImplementedError: If not implemented by subclass
+
+        【中文】将内部的 Pose 轨迹转换为指定的数值动作格式：
+        【中文】- 对关节轨迹通常导出为 (N, num_joints) 的关节角数组；
+        【中文】- 对末端轨迹可以导出为齐次矩阵、xyz+rot6d、xyz+rotvec 等多种形式；
+        【中文】具体支持的格式和转换逻辑由各个子类实现。
         """
         raise NotImplementedError("Subclasses must implement to method")
 
     def __len__(self) -> int:
-        """Return the number of poses in the action chunking"""
+        """Return the number of poses in the action chunking.
+
+        【中文】返回轨迹长度（位姿数量）。
+        """
         return len(self._poses)
 
     def __getitem__(self, index: int) -> PoseType:
-        """Get a pose by index"""
+        """Get a pose by index.
+
+        【中文】按索引访问第 index 个位姿（支持切片访问单个 Pose）。
+        """
         return self._poses[index]
 
     def __repr__(self) -> str:
@@ -224,6 +281,11 @@ class JointActionChunk(ActionChunk[JointPose]):
         # Convert to desired format
         from gr00t.data.types import ActionFormat
         array_data = action_chunking.to(ActionFormat.DEFAULT)  # Returns joint array
+
+    【中文】关节空间的动作片段表示：
+    【中文】- 内部保存一串 JointPose，描述机器人在关节空间的运动轨迹；
+    【中文】- 提供相对/增量轨迹、插值、以及导出为 (N, num_joints) 数组的能力；
+    【中文】适合直接驱动关节级控制器，或作为网络关节动作的输出/标签。
     """
 
     def __init__(
@@ -240,6 +302,11 @@ class JointActionChunk(ActionChunk[JointPose]):
 
         Raises:
             TypeError: If poses are not all JointPose objects
+
+        【中文】从一组 JointPose 构造关节轨迹：
+        【中文】- 会检查所有元素类型是否都是 JointPose，若出现其他类型会抛出 TypeError；
+        【中文】- 可选的 times 参数用于指定时间戳，不提供则使用等间隔时间；
+        【中文】通常由 StateActionProcessor 的关节动作分支调用。
         """
         # Validate all poses are JointPose
         if not all(isinstance(p, JointPose) for p in poses):
@@ -267,6 +334,11 @@ class JointActionChunk(ActionChunk[JointPose]):
         Raises:
             ValueError: If neither num_points nor times is provided, or if
                        interpolation times are outside the trajectory range
+
+        【中文】对关节轨迹做线性插值，生成中间关节配置：
+        【中文】- 关节值按时间轴做逐维线性插值；
+        【中文】- 若存在非单调递增的时间戳，会打印并丢弃对应点，保证插值的时间单调性；
+        【中文】- 可指定总采样点数 num_points，或显式给出插值时间 times，超出时间范围会报错。
         """
         if num_points is None and times is None:
             raise ValueError("Must provide either num_points or times")
@@ -330,6 +402,10 @@ class JointActionChunk(ActionChunk[JointPose]):
 
         Returns:
             Array with shape (N, num_joints) where N is the number of poses
+
+        【中文】将关节轨迹导出为纯数值数组：
+        【中文】- 返回形状 (N, num_joints)，其中 N 为时间步数；
+        【中文】- 每一行对应一个时间步的所有关节角，可直接用于模型输入或保存到文件。
         """
         return np.array([pose.joints for pose in self._poses])
 
@@ -349,6 +425,11 @@ class JointActionChunk(ActionChunk[JointPose]):
 
         Raises:
             ValueError: If joint dimensions don't match
+
+        【中文】将“相对关节轨迹”还原为“绝对关节轨迹”：
+        【中文】- 要求相对轨迹与参考帧的关节维度一致，否则抛出 ValueError；
+        【中文】- 对每一帧执行 `absolute = reference_frame.joints + relative_pose.joints`；
+        【中文】常用于把模型预测的相对关节增量叠加回某个已知姿态上。
         """
         if not self._poses:
             return JointActionChunk([], times=[])
@@ -382,6 +463,10 @@ class JointActionChunk(ActionChunk[JointPose]):
 
         Raises:
             ValueError: If the action format is not supported for joint trajectories
+
+        【中文】将关节轨迹转换为指定的动作格式：
+        【中文】- 当前仅支持 ActionFormat.DEFAULT，对应 `to_array()` 输出的关节角数组；
+        【中文】- 若请求其他格式，会抛出 ValueError，提醒调用方不支持该格式。
         """
         if action_format == ActionFormat.DEFAULT:
             return self.to_array()
@@ -432,6 +517,11 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
         homo_matrices = action_chunking.to(ActionFormat.DEFAULT)      # (N, 4, 4) homogeneous matrices
         xyz_rot6d = action_chunking.to(ActionFormat.XYZ_ROT6D)        # (N, 9) xyz + rot6d
         xyz_rotvec = action_chunking.to(ActionFormat.XYZ_ROTVEC)      # (N, 6) xyz + rotvec
+
+    【中文】末端执行器在笛卡尔空间的动作片段表示：
+    【中文】- 内部保存一串 EndEffectorPose，描述手/工具在空间中的轨迹；
+    【中文】- 相对/增量轨迹都在 SE(3) 上计算，支持插值和平滑；
+    【中文】- 可导出为齐次矩阵或 xyz + 旋转（rot6d/rotvec）等多种格式，方便网络输入或控制器使用。
     """
 
     def __init__(
@@ -448,6 +538,10 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Raises:
             TypeError: If poses are not all EndEffectorPose objects
+
+        【中文】从一组 EndEffectorPose 构造末端轨迹：
+        【中文】- 检查所有元素是否都是 EndEffectorPose，否则抛出 TypeError；
+        【中文】- 可选的 times 用于时间轴定义，用于插值与对齐，不会改变几何轨迹本身。
         """
         # Validate all poses are EndEffectorPose
         if not all(isinstance(p, EndEffectorPose) for p in poses):
@@ -476,6 +570,11 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
         Raises:
             ValueError: If neither num_points nor times is provided, or if
                        interpolation times are outside the trajectory range
+
+        【中文】对末端轨迹做插值：
+        【中文】- 平移部分使用线性插值，保证轨迹在空间中平滑移动；
+        【中文】- 旋转部分使用四元数 SLERP 球面线性插值，避免欧拉角插值带来的奇异和非匀速；
+        【中文】- 若时间戳不单调，会先剔除不合法的时间点，再进行插值，确保数值稳定。
         """
         if num_points is None and times is None:
             raise ValueError("Must provide either num_points or times")
@@ -550,6 +649,10 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Returns:
             Array of homogeneous matrices with shape (N, 4, 4) where N is the number of poses
+
+        【中文】将末端轨迹导出为一组 4x4 齐次变换矩阵：
+        【中文】- 形状为 (N, 4, 4)，每一帧都是 SE(3) 中的一个变换；
+        【中文】- 适合直接用于几何运算或下游控制模块。
         """
         return np.array([pose.homogeneous for pose in self._poses])
 
@@ -559,6 +662,10 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Returns:
             Array with shape (N, 9) - 3 for xyz + 6 for rot6d
+
+        【中文】将末端轨迹导出为 xyz + rot6d 格式：
+        【中文】- 每一帧得到长度为 9 的向量：[x, y, z, rot6d...]；
+        【中文】- rot6d 来自内部 Pose 的 6D 旋转表示，适合作为模型输入或动作表示。
         """
         translations = np.array([pose.translation for pose in self._poses])  # (N, 3)
         rotations = np.array([pose.rot6d for pose in self._poses])  # (N, 6)
@@ -574,6 +681,10 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Returns:
             Array with shape (N, 6) - 3 for xyz + 3 for rotvec
+
+        【中文】将末端轨迹导出为 xyz + 旋转向量 格式：
+        【中文】- 每一帧得到长度为 6 的向量：[x, y, z, rx, ry, rz]；
+        【中文】- 适合与以轴-角形式建模旋转的算法或网络对接。
         """
         translations = np.array([pose.translation for pose in self._poses])  # (N, 3)
         rotations = np.array([pose.rotvec for pose in self._poses])  # (N, 3)
@@ -597,6 +708,11 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Returns:
             A new EndEffectorActionChunk with absolute poses.
+
+        【中文】将“相对末端轨迹”还原为“绝对末端轨迹”：
+        【中文】- 先取参考帧的齐次矩阵 T_ref；
+        【中文】- 对每一帧相对位姿 T_relative 执行 T_absolute = T_ref @ T_relative；
+        【中文】- 将组合后的绝对变换重新封装为 EndEffectorPose 序列返回。
         """
         if not self._poses:
             return EndEffectorActionChunk([], times=[])
@@ -631,6 +747,12 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         Raises:
             ValueError: If the action format is not supported
+
+        【中文】按指定的 ActionFormat 导出末端轨迹：
+        【中文】- DEFAULT: 返回 (N, 4, 4) 的齐次矩阵序列；
+        【中文】- XYZ_ROT6D: 返回 (N, 9) 的 xyz+rot6d 轨迹；
+        【中文】- XYZ_ROTVEC: 返回 (N, 6) 的 xyz+rotvec 轨迹；
+        【中文】- 其他未支持的格式会抛出 ValueError，提醒调用方使用受支持的几种编码方式。
         """
         if action_format == ActionFormat.DEFAULT:
             return self.to_homogeneous_matrices()

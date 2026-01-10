@@ -301,7 +301,22 @@ class ShardedSingleStepDataset(ShardedDataset):
             episode_data, step_index, self.modality_configs, self.embodiment_tag, self.allow_padding
         )
         # 应用处理器转换为模型输入
+
         messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
+        # processor 返回模型就绪的处理后数据
+        # 示例返回结构（以 gr1 具身形态、存在动作为例）：
+        # {
+        #     "state": Tensor[T, max_state_dim],              # 归一化并按模态拼接后的状态，右侧 0-padding 到统一维度
+        #     "action": Tensor[max_action_horizon, max_action_dim],  # 归一化并拼接后的动作，时间和维度两侧 0-padding
+        #     "action_mask": Tensor[max_action_horizon, max_action_dim],  # 同 shape 的 0/1 mask，标记哪些位置是真实动作
+        #     "vlm_content": {
+        #         "text": str,                               # （可正规化后的）语言指令
+        #         "images": list[Tensor],                    # 经过图像增广/预处理后的多视角图像张量列表
+        #         "conversation": list[dict],                # 下游 VLM（例如对话式多模态模型）需要的对话格式输入
+        #     },
+        #     "embodiment_id": int                           # 具身形态 ID，模型内部选择对应视觉/动作头
+        # }
+
         return self.processor(messages)
 
     def get_shard_length(self, idx: int) -> int:
@@ -316,6 +331,7 @@ class ShardedSingleStepDataset(ShardedDataset):
         """
         return self.shard_lengths[idx]
 
+    # 关键方法！！！！！！！！！ 返回一堆样本，每个样本是预处理好的VLA输入特征，基本已经准备的差不多了
     def get_shard(self, idx: int) -> list:
         """
         加载并处理特定分片中的所有时间步。

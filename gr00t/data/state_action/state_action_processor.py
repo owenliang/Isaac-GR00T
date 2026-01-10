@@ -6,6 +6,13 @@ Handles:
 - Action normalization
 - Absolute <-> Relative action representation conversion
 - Action processing with state dependency
+
+【中文】统一的机器人状态与动作处理模块。
+【中文】主要职责：
+【中文】- 对不同具身形态的关节状态做归一化（min/max、mean/std、或 sin/cos 编码）；
+【中文】- 对动作做归一化，并在需要时在“绝对动作”和“相对动作”表示之间互相转换；
+【中文】- 在相对动作表示下，利用当前状态（state）作为参考系进行转换；
+【中文】- 提供便捷接口，将状态/动作的一整套处理逻辑封装为 `apply` / `unapply` 调用，供 Processor 直接使用。
 """
 
 from copy import deepcopy
@@ -66,6 +73,14 @@ class StateActionProcessor:
             use_percentiles: Whether to use percentiles (q01/q99) instead of min/max
             clip_outliers: Whether to clip normalized values to [-1, 1]
             apply_sincos_state_encoding: Global flag to enable sin/cos encoding for states
+
+        【中文】初始化统一的状态/动作处理器。
+        【中文】- modality_configs：按具身形态组织的模态配置，用来约定有哪些关节组、哪些模态（state/action）；
+        【中文】- statistics：来自数据集统计脚本（stats.json/relative_stats.json）的统计量，用于归一化；
+        【中文】- use_percentiles：是否使用百分位（q01/q99）代替 min/max，提高鲁棒性；
+        【中文】- clip_outliers：是否对归一化后的值裁剪到 [-1, 1]；
+        【中文】- apply_sincos_state_encoding：是否对部分状态用 sin/cos 编码（角度型量）；
+        【中文】- use_relative_action：是否启用相对动作表示（例如以当前末端位姿为参考）。
         """
         self.modality_configs = parse_modality_configs(modality_configs)
         self.statistics: dict[str, dict[str, dict[str, dict[str, list[float]]]]] = {}
@@ -101,6 +116,12 @@ class StateActionProcessor:
         Args:
             statistics: Nested dict with structure:
                 {embodiment_tag: {modality: {joint_group: {stat_type: values}}}}
+
+        【中文】设置用于归一化的“数据集统计信息”。
+        【中文】- 统计结构按 `embodiment_tag → modality(state/action/relative_action) → joint_group` 组织；
+        【中文】- 每个 joint_group 下包含 min/max/mean/std/q01/q99 等标量数组；
+        【中文】- 若 override=False，则已存在的具身不会被覆盖（方便增量添加新具身）。
+        【中文】本函数会在内部调用 `_compute_normalization_parameters`，把原始统计量转换为便于数值计算的 numpy 形式并缓存到 `norm_params`。
         """
         for key in statistics:
             if key not in self.statistics or override:
@@ -110,7 +131,15 @@ class StateActionProcessor:
         self._compute_normalization_parameters()
 
     def _compute_normalization_parameters(self) -> None:
-        """Compute and cache normalization parameters from statistics for all embodiments and modalities."""
+        """Compute and cache normalization parameters from statistics for all embodiments and modalities.
+
+        【中文】根据当前 `self.statistics` 计算并缓存归一化参数 `norm_params`：
+        【中文】- 对每个具身、每个模态（state/action）、每个 joint_group：
+        【中文】  - 选择 min/max 或 q01/q99 作为归一化区间；
+        【中文】  - 记录 mean/std 用于均值方差归一化；
+        【中文】  - 记录 dim（维度）方便后续拼接和推断整体维度；
+        【中文】- 若启用了相对动作，并在 `statistics[embodiment]["relative_action"]` 中提供了相对动作统计，会用其覆盖对应动作组的 absolute 统计。
+        """
         for embodiment_tag in self.statistics:
             self.norm_params[embodiment_tag] = {}
 
@@ -187,6 +216,13 @@ class StateActionProcessor:
             Dict mapping joint_group -> processed state values
                 - Sin/cos encoded groups: (..., 2*D)
                 - Other groups: (..., D)
+
+        【中文】对“原始状态”做归一化/编码处理：
+        【中文】- 按具身和 joint_group 查找对应统计量与配置；
+        【中文】- 若该关节组配置了 sin/cos 编码，则直接对角度向量做三角编码（维度翻倍）；
+        【中文】- 若配置了 mean/std 归一化，则以均值方差方式缩放；
+        【中文】- 否则使用 min/max 映射到 [-1, 1]，并在 `clip_outliers=True` 时做裁剪；
+        【中文】最终返回的字典结构与输入的 state keys 一致，但每个 value 已经是“模型空间”的归一化值。
         """
         normalized_values = {}
         state = deepcopy(state)  # Avoid modifying input
@@ -318,6 +354,11 @@ class StateActionProcessor:
 
         Raises:
             ValueError: If state is None but required for relative action conversion
+
+        【中文】对“原始动作序列”做两步处理：
+        【中文】1. 若配置为相对动作（RELATIVE）且启用 use_relative_action，则以给定 state 末步为参考系，将绝对动作转换为相对动作；
+        【中文】2. 按统计量做归一化（mean/std 或 min/max），并在需要时裁剪到 [-1, 1]；
+        【中文】返回的字典与输入 action 的关节组 key 保持一致，但数值已经是归一化后的表示。
         """
         action = deepcopy(action)  # Avoid modifying input
 
@@ -406,6 +447,11 @@ class StateActionProcessor:
 
         Raises:
             ValueError: If state is None but required for relative->absolute conversion
+
+        【中文】撤销对动作的处理：
+        【中文】- 第一步：将归一化后的动作反归一化回原始数值尺度；
+        【中文】- 第二步：若配置为相对动作且启用 use_relative_action，则结合给定状态，把相对动作还原为绝对动作轨迹；
+        【中文】该接口常用于“把模型输出的归一化相对动作，转换成机器人可以直接执行的绝对关节/末端动作”。
         """
         # Step 1: Unnormalize actions
         unnormalized_values = {}
@@ -505,6 +551,11 @@ class StateActionProcessor:
 
         Returns:
             Tuple of (processed_state, processed_action)
+
+        【中文】同时对“状态 + 动作”做处理的便捷接口：
+        【中文】- 先调用 `apply_state` 对状态归一化；
+        【中文】- 再将**原始状态**（未归一化）传给 `apply_action`，以便在相对动作模式下使用原始参考系；
+        【中文】- 训练时要求 action 非空；推理时允许 action 为空（只处理状态）。
         """
         processed_state = self.apply_state(state, embodiment_tag)
         if action:
@@ -533,6 +584,11 @@ class StateActionProcessor:
 
         Returns:
             Tuple of (raw_state, raw_action)
+
+        【中文】同时撤销“状态 + 动作”的处理：
+        【中文】- 先尝试调用 `unapply_state` 将状态从归一化空间还原回原始空间；
+        【中文】- 再用还原后的状态（或调用者提供的 raw_state）作为参考系，把动作从归一化/相对表示还原为原始动作；
+        【中文】若状态经过 sin/cos 编码而又没有提供 raw_state，则无法完全恢复，会抛出明确异常提示。
         """
         # Unapply state first
         try:
@@ -562,6 +618,12 @@ class StateActionProcessor:
 
         Returns:
             Total state dimension across all joint groups
+
+        【中文】获取“处理后的状态总维度”：
+        【中文】- 先按 `modality_configs[embodiment_tag]["state"].modality_keys` 遍历所有关节组；
+        【中文】- 每个关节组使用 `norm_params` 中记录的 `dim` 作为基础维度；
+        【中文】- 若 `include_sincos_expansion=True` 且该组启用了 sin/cos 编码，则维度乘以 2；
+        【中文】常用于推断模型输入层的状态特征维度，或在 Processor 之外构建自定义网络时做 sanity check。
         """
         total_dim = 0
         state_config = self.modality_configs[embodiment_tag]["state"]
@@ -591,6 +653,9 @@ class StateActionProcessor:
 
         Returns:
             Total action dimension across all joint groups
+
+        【中文】获取“动作总维度”：遍历当前具身配置中的各个动作关节组，将其 `dim` 相加，
+        【中文】通常用于构造策略网络的输出维度或检查 Processor 与模型头部的一致性。
         """
         total_dim = 0
         for joint_group in self.modality_configs[embodiment_tag]["action"].modality_keys:
@@ -604,10 +669,29 @@ class StateActionProcessor:
         action_type: ActionType,
         action_format: ActionFormat,
     ) -> np.ndarray:
-        """Convert absolute action to relative action using reference state."""
+        """Convert absolute action to relative action using reference state.
+
+        【中文】将“绝对动作序列”转换为“相对参考状态”的动作：
+        【中文】- 对末端动作（EEF）使用 `EndEffectorActionChunk` + `EndEffectorPose` 做位姿差分；
+        【中文】- 对关节空间动作（NON_EEF）使用 `JointActionChunk` + `JointPose` 做关节差分；
+        【中文】- 最终再按指定的 `action_format`（如 xyz+rot6d）导出为数值数组。
+        """
         assert action.ndim == 2, f"Expected action shape (T, D), got {action.shape}"
         assert reference_state.ndim == 1, f"Expected state shape (D,), got {reference_state.shape}"
 
+        '''
+        控制空间不同：
+        EEF：在笛卡尔空间（3D 世界坐标）控制末端位姿。
+        NON_EEF：在关节空间（每个关节角度/位置）控制整条机械臂。
+        优缺点直觉：
+        EEF：
+        优点：对「手要去哪里」的语义更直观，跟任务描述更贴近（抓、放、插入等），适合高层策略/模仿动作。
+        缺点：需要底层的逆运动学/控制器，把末端位姿转成关节命令；有些姿态在某些机器人上不可达或有多解。
+        NON_EEF：
+        优点：直接跟电机命令一一对应，控制链条短、可预测性强；没有额外 IK 误差。
+        缺点：对模型来说，学到的是“关节怎么动”而不是“手去哪”，语义没那么直观，也更依赖具体机器人结构。
+        '''
+        # 末端爪子
         if action_type == ActionType.EEF:
             assert action.shape[1] == 9, (
                 f"Expected action dim 9 (xyz + rot6d) for EEF, got {action.shape[1]}"
@@ -616,22 +700,27 @@ class StateActionProcessor:
             action_chunking = EndEffectorActionChunk(
                 [
                     EndEffectorPose(translation=m[:3], rotation=m[3:], rotation_type="rot6d")
-                    for m in action
+                    for m in action # T个连续的action
                 ]
             )
+            # state作为基准，计算相对变化
             reference_frame = EndEffectorPose(
                 translation=reference_state[:3],
                 rotation=reference_state[3:],
                 rotation_type="rot6d",
             )
 
-        elif action_type == ActionType.NON_EEF:
+        elif action_type == ActionType.NON_EEF: # 非末端的关节
             action_chunking = JointActionChunk([JointPose(m) for m in action])
-            reference_frame = JointPose(reference_state)
+            reference_frame = JointPose(reference_state)            # state作为基准，计算相对变化
 
         else:
             raise ValueError(f"Unknown ActionType: {action_type}")
 
+
+        # 将绝对动作转换为相对于参考帧的动作
+        # 对于末端执行器(EEF)动作：计算目标位姿相对于当前末端位姿的偏移量（位置差+旋转差）
+        # 对于关节空间(NON_EEF)动作：计算目标关节角度相对于当前关节角度的偏移量
         relative_action_chunking = action_chunking.relative_chunking(
             reference_frame=reference_frame
         )
@@ -644,7 +733,13 @@ class StateActionProcessor:
         action_type: ActionType,
         action_format: ActionFormat,
     ) -> np.ndarray:
-        """Convert relative action to absolute action using reference state."""
+        """Convert relative action to absolute action using reference state.
+
+        【中文】将“相对动作序列”恢复为“绝对动作”：
+        【中文】- 逻辑上与 `_convert_to_relative_action` 相反，给定参考状态与相对动作；
+        【中文】- 对末端/关节空间分别使用对应的 chunking/pose 类型；
+        【中文】- 最终得到与 `action_format` 对应的绝对动作数组，可直接下发给机器人控制器或仿真环境。
+        """
         assert action.ndim == 2, f"Expected action shape (T, D), got {action.shape}"
         assert reference_state.ndim == 1, f"Expected state shape (D,), got {reference_state.shape}"
         assert reference_state.shape[0] == action.shape[1], (

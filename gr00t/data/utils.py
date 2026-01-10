@@ -19,6 +19,11 @@ def apply_sin_cos_encoding(values: np.ndarray) -> np.ndarray:
     Note: This DOUBLES the dimension. For example:
         Input:  [v₁, v₂, v₃] with shape (..., 3)
         Output: [sin(v₁), sin(v₂), sin(v₃), cos(v₁), cos(v₂), cos(v₃)] with shape (..., 6)
+
+    【中文】对输入向量做逐元素的 sin/cos 编码：
+    【中文】- 输入 shape 为 (..., D)，通常对应一组角度或周期型信号；
+    【中文】- 输出 shape 为 (..., 2*D)，前一半是 sin(values)，后一半是 cos(values)；
+    【中文】- 常用于将角度类状态映射到无界空间，消除 2π 周期带来的不连续性，以利于模型学习。
     """
     sin_values = np.sin(values)
     cos_values = np.cos(values)
@@ -43,6 +48,11 @@ def nested_dict_to_numpy(data):
         >>> print(result["a"]["b"])
         [[0 1]
          [2 3]]
+
+    【中文】递归地把“嵌套字典”中最底层的 list/list of lists 转成 numpy.ndarray：
+    【中文】- 输入通常是从 JSON 或 dataclass 转换而来的多层结构；
+    【中文】- 遇到 dict 就对子节点递归调用，遇到 list 则直接用 np.array 包装；
+    【中文】- 常用于将统计量或配置中的列表结构变成方便数值运算的 numpy 形式。
     """
     if isinstance(data, dict):
         return {key: nested_dict_to_numpy(value) for key, value in data.items()}
@@ -83,6 +93,12 @@ def normalize_values_minmax(values, params):
 
         # 2D bounds - per-step normalization
         values: (8, 4), params["min"]: (8, 4), params["max"]: (8, 4)
+
+    【中文】按逐特征的 min/max 将数值线性映射到 [-1, 1] 区间：
+    【中文】- 支持 2D (T, D) 或 3D (B, T, D) 形状，最后一维为特征维；
+    【中文】- params["min"], params["max"] 可以是一维（所有时间步共用边界），也可以是二维（每个时间步单独边界）；
+    【中文】- 对于 min==max 的特征维，归一化结果直接置为 0，避免除以 0；
+    【中文】常用于将状态/动作缩放到统一尺度，方便在不同维度间共享网络结构。
     """
     min_vals = params["min"]
     max_vals = params["max"]
@@ -90,10 +106,10 @@ def normalize_values_minmax(values, params):
 
     mask = ~np.isclose(max_vals, min_vals)
 
-    normalized[..., mask] = (values[..., mask] - min_vals[..., mask]) / (
+    normalized[..., mask] = (values[..., mask] - min_vals[..., mask]) / ( # 0~1
         max_vals[..., mask] - min_vals[..., mask]
     )
-    normalized[..., mask] = 2 * normalized[..., mask] - 1
+    normalized[..., mask] = 2 * normalized[..., mask] - 1  # -1~1
 
     return normalized
 
@@ -126,6 +142,11 @@ def unnormalize_values_minmax(normalized_values, params):
 
         # 2D bounds - per-step unnormalization
         normalized_values: (8, 4), params["min"]: (8, 4), params["max"]: (8, 4)
+
+    【中文】将经过 min-max 归一化到 [-1, 1] 的值还原回原始数值区间：
+    【中文】- 先把输入裁剪到 [-1, 1]，再按线性映射反变换到 [min, max]；
+    【中文】- 支持全局边界和逐步边界两种形式，与 `normalize_values_minmax` 完全对偶；
+    【中文】常用于从模型输出的归一化动作/状态恢复到物理空间的实际量纲。
     """
 
     min_vals = params["min"]
@@ -165,6 +186,11 @@ def normalize_values_meanstd(values, params):
 
         # 2D params - per-step normalization
         values: (8, 4), params["mean"]: (8, 4), params["std"]: (8, 4)
+
+    【中文】使用均值/方差做 z-score 归一化：
+    【中文】- 公式为 (x - mean) / std，在不同时间步或不同维度上可以使用各自的 mean/std；
+    【中文】- std==0 时不做缩放，直接返回原值，避免数值溢出；
+    【中文】常用于“高斯化”某些特征（例如速度、加速度），使其在网络输入中具有零均值与单位方差。
     """
     mean_vals = params["mean"]
     std_vals = params["std"]
@@ -212,6 +238,11 @@ def unnormalize_values_meanstd(normalized_values, params):
 
         # 2D params - per-step unnormalization
         normalized_values: (8, 4), params["mean"]: (8, 4), params["std"]: (8, 4)
+
+    【中文】撤销均值/方差归一化（z-score 的反变换）：
+    【中文】- 使用公式 x = normalized * std + mean 将值从标准化空间还原回原始尺度；
+    【中文】- std==0 的特征维直接保留原值，确保数值稳定；
+    【中文】通常与 `normalize_values_meanstd` 配套，用于把模型输出或中间特征还原到物理量纲。
     """
     mean_vals = params["mean"]
     std_vals = params["std"]
@@ -242,6 +273,13 @@ def to_json_serializable(obj: Any) -> Any:
 
     Returns:
         JSON-serializable representation of the object
+
+    【中文】递归地将各种 Python / NumPy / dataclass 对象转换为“可 JSON 序列化”的基础类型：
+    【中文】- dataclass → dict → 继续递归处理；
+    【中文】- numpy 数组/标量 → list/int/float/bool；
+    【中文】- dict / list / tuple / set → 逐元素转换；
+    【中文】- Enum → 使用枚举名（name）；
+    【中文】常用于将配置、统计信息或 Processor 状态写入 json 文件，保证不会出现无法序列化的对象。
     """
     if is_dataclass(obj) and not isinstance(obj, type):
         # Convert dataclass to dict, then recursively process the dict

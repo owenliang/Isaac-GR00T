@@ -42,6 +42,22 @@ GR00T N1.6 在代码中由 `Gr00tN1d6` 类实现（`gr00t/model/gr00t_n1d6/gr00t
   - **视觉-语言骨干（Backbone）**：`EagleBackbone`，封装 NVIDIA Eagle VLM，用于将图像和指令文本编码为一串 token 表示。
   - **动作头（Action Head）**：`Gr00tN1d6ActionHead`，基于 DiT/AlternateVLDiT 的流匹配（flow matching）扩散策略，从 backbone 表征 + 机器人状态推断动作轨迹的速度场，并迭代积分得到动作序列。
   - **数据处理器（Processor/Collator）**：`Gr00tN1d6DataCollator` 与 `Gr00tN1d6Processor`（`gr00t/model/gr00t_n1d6/processing_gr00t_n1d6.py`），将原始视频/状态/文本转成模型需要的张量格式。
+  
+  - **Processor 单样本输出格式（训练模式，存在动作）**：
+  
+    ```python
+    model_inputs = {
+        "state": Tensor[T, max_state_dim],                     # 归一化并按模态拼接后的状态，右侧 0-padding
+        "action": Tensor[max_action_horizon, max_action_dim], # 归一化并拼接后的动作，时间和维度两侧 0-padding
+        "action_mask": Tensor[max_action_horizon, max_action_dim],  # 0/1 mask，标记哪些位置是真实动作
+        "vlm_content": {
+            "text": str,                                      # （可正规化后的）语言指令
+            "images": list[Tensor],                           # 经过图像增广/预处理后的多视角图像张量列表
+            "conversation": list[dict],                       # 下游 VLM（例如对话式多模态模型）需要的对话格式输入
+        },
+        "embodiment_id": int                                  # 具身形态 ID，模型内部选择对应视觉/动作头
+    }
+    ```
 
 - **关键超参（见 `gr00t/configs/model/gr00t_n1d6.py`）**：
   - `backbone_embedding_dim = 2048`：视觉-语言 token 的特征维度。

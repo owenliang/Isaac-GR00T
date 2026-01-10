@@ -19,6 +19,12 @@ def invert_transformation(T: NDArray[np.float64]) -> NDArray[np.float64]:
 
     Returns:
         The inverse of the transformation matrix (4x4)
+
+    【中文】对 4x4 齐次变换矩阵求逆：
+    【中文】- 输入 T 由旋转 R 和平移 t 组成，形如 [[R, t], [0, 1]]；
+    【中文】- 先对旋转部分转置 R^T，作为逆旋转；
+    【中文】- 再计算新的平移向量 -R^T @ t，表示在逆旋转坐标系下的反向位移；
+    【中文】- 最终返回的仍是一个 4x4 齐次变换矩阵，可与其他位姿做左乘/右乘运算。
     """
     R = T[:3, :3]  # Extract the rotation matrix
     t = T[:3, 3]  # Extract the translation vector
@@ -49,6 +55,11 @@ def relative_transformation(
 
     Returns:
         The relative transformation matrix (4x4) from T0 to Tt
+
+    【中文】计算两个齐次位姿之间的相对变换：
+    【中文】- 输入 T0 表示参考帧（起始位姿），Tt 表示当前帧；
+    【中文】- 通过 T0^{-1} @ Tt 得到“从 T0 到 Tt”需要施加的位姿增量；
+    【中文】- 在末端位姿计算中，这个结果可用来表示相对运动，用于相对动作或误差反馈。
     """
     # Relative transformation is T0^{-1} * Tt
     T_relative = invert_transformation(T0) @ Tt
@@ -56,7 +67,15 @@ def relative_transformation(
 
 
 class RotationType(Enum):
-    """Supported rotation representation types"""
+    """Supported rotation representation types.
+
+    【中文】支持的“旋转表示”类型，用于在不同数值格式之间做统一转换：
+    【中文】- QUAT: 四元数；
+    【中文】- EULER: 欧拉角；
+    【中文】- ROTVEC: 旋转向量（轴-角）；
+    【中文】- MATRIX: 3x3 旋转矩阵；
+    【中文】- ROT6D: 6 维旋转表示（矩阵前两行展平），常用于深度学习中避免万向节锁。
+    """
 
     QUAT = "quat"
     EULER = "euler"
@@ -66,7 +85,12 @@ class RotationType(Enum):
 
 
 class EulerOrder(Enum):
-    """Common Euler angle conventions"""
+    """Common Euler angle conventions.
+
+    【中文】常见的欧拉角旋转顺序约定：
+    【中文】- 如 XYZ、ZYX 等，对应 `Rotation.from_euler` / `as_euler` 中的顺序字符串；
+    【中文】不同顺序对应的旋转含义不同，必须与生成/消费该角度的下游模块保持一致。
+    """
 
     XYZ = "xyz"
     ZYX = "zyx"
@@ -77,7 +101,13 @@ class EulerOrder(Enum):
 
 
 class QuatOrder(Enum):
-    """Quaternion ordering conventions"""
+    """Quaternion ordering conventions.
+
+    【中文】四元数分量顺序约定：
+    【中文】- WXYZ: 标量在前 (w, x, y, z)，常见于某些机器人中间件；
+    【中文】- XYZW: 标量在后 (x, y, z, w)，scipy 默认使用该顺序；
+    【中文】本模块在与 scipy 交互时会根据约定做顺序转换，避免混用导致的旋转错误。
+    """
 
     WXYZ = "wxyz"  # scalar-first (w, x, y, z)
     XYZW = "xyzw"  # scalar-last (x, y, z, w)
@@ -89,6 +119,11 @@ class Pose:
 
     This class provides common functionality for different pose representations
     including relative pose computation via the subtraction operator.
+
+    【中文】机器人“位姿”抽象基类：
+    【中文】- 为关节空间位姿 (JointPose) 和末端位姿 (EndEffectorPose) 提供统一接口；
+    【中文】- 约定减法运算符 `self - other` 表示“相对位姿”，具体计算由子类实现；
+    【中文】- 通过 `pose_type` 区分不同位姿类型，便于上层逻辑做分支处理。
     """
 
     pose_type: str
@@ -123,6 +158,11 @@ class Pose:
             joint1 = JointPose([0.0, 0.5, 1.0])
             joint2 = JointPose([0.1, 0.6, 1.2])
             joint_diff = joint2 - joint1  # Joint differences: [0.1, 0.1, 0.2]
+
+        【中文】统一的“位姿相减”接口：
+        【中文】- 若是 EndEffectorPose，则计算从 `other` 到 `self` 的相对位姿（T_other^{-1} * T_self）；
+        【中文】- 若是 JointPose，则按元素做关节向量差值，得到关节空间的相对位移；
+        【中文】- 要求两者类型一致，否则抛出 TypeError，避免混用关节/笛卡尔空间位姿。
         """
         if type(self) is not type(other):
             raise TypeError(
@@ -142,6 +182,11 @@ class Pose:
 
         Returns:
             Relative pose
+
+        【中文】子类需要实现的“相对位姿计算”内部接口：
+        【中文】- JointPose 中实现为关节向量相减；
+        【中文】- EndEffectorPose 中实现为齐次矩阵相对变换；
+        【中文】基类不提供默认实现，强制要求子类根据各自语义明确相对运算的定义。
         """
         raise NotImplementedError("Subclasses must implement _compute_relative")
 
@@ -152,6 +197,10 @@ class Pose:
 
         Returns:
             New Pose instance with copied data
+
+        【中文】创建当前位姿对象的深拷贝：
+        【中文】- 返回一个独立的新实例，内部数值（关节/位姿矩阵）不与原对象共享内存；
+        【中文】- 具体拷贝逻辑由子类负责实现，以保证各自内部缓存/属性的一致性。
         """
         raise NotImplementedError("Subclasses must implement copy")
 
@@ -351,6 +400,12 @@ class EndEffectorPose(Pose):
         pose2 = EndEffectorPose(translation=[2, 0, 0], rotation=[1,0,0,0],
                                rotation_type="quat", rotation_order="wxyz")
         relative = pose2 - pose1  # Transformation from pose1's frame to pose2's frame
+
+    【中文】末端执行器在笛卡尔空间下的位姿表示：
+    【中文】- 同时包含平移向量和平移矩阵（齐次变换）两部分信息；
+    【中文】- 内部统一用 scipy 的 Rotation 表示旋转，但对外支持多种表示格式（quat/euler/rotvec/matrix/rot6d）；
+    【中文】- 支持从齐次矩阵构造，以及不同旋转表示之间的互相转换；
+    【中文】- 通过减法运算可以方便地得到相对末端位姿，用于相对动作或误差计算。
     """
 
     pose_type = "end_effector"
@@ -375,6 +430,12 @@ class EndEffectorPose(Pose):
             homogeneous: Homogeneous transformation matrix (4, 4)
                         If provided, overrides translation and rotation
             degrees: For Euler angles, whether the input is in degrees (default True)
+
+        【中文】末端位姿的构造函数：
+        【中文】- 可以通过齐次矩阵 `homogeneous` 一次性指定平移和旋转，此时忽略 translation/rotation 参数；
+        【中文】- 也可以分别传入平移向量和旋转（配合 rotation_type / rotation_order 指明表示方式）；
+        【中文】- 对于欧拉角，`degrees=True` 表示输入为角度制，False 表示弧度制；
+        【中文】无论何种方式，内部都会统一成 Rotation 对象和 3 维平移向量，方便后续转换和相对运算。
         """
         super().__init__()
 
@@ -399,7 +460,13 @@ class EndEffectorPose(Pose):
             self._rotation = Rotation.identity()
 
     def _from_homogeneous(self, homogeneous: np.ndarray):
-        """Initialize from homogeneous transformation matrix"""
+        """Initialize from homogeneous transformation matrix.
+
+        【中文】从 4x4 齐次变换矩阵初始化末端位姿：
+        【中文】- 直接从矩阵最后一列前三个元素提取平移向量；
+        【中文】- 从左上角 3x3 子矩阵提取旋转矩阵，并构造 Rotation 对象；
+        【中文】用于在外部算法已经以齐次矩阵形式给出位姿时，快速载入到统一的 Pose 表示中。
+        """
         homogeneous = np.array(homogeneous)
 
         # Extract translation (last column, first 3 rows)
@@ -421,6 +488,12 @@ class EndEffectorPose(Pose):
 
         Returns:
             Rotation matrix (3, 3)
+
+        【中文】将 6 维旋转表示还原为 3x3 旋转矩阵：
+        【中文】- 输入是将旋转矩阵的前两行展平成长度为 6 的向量；
+        【中文】- 先对第一行做归一化，视作正交基中的第一个向量；
+        【中文】- 再对第二行做 Gram-Schmidt 正交化并归一化，得到第二个基向量；
+        【中文】- 第三个基向量由前两者叉乘得到，保证矩阵正交、行列式为 1。
         """
         rot6d = rot6d.reshape(2, 3)
 
@@ -453,6 +526,10 @@ class EndEffectorPose(Pose):
 
         Returns:
             6D rotation - (6,) array (first two rows flattened)
+
+        【中文】将 3x3 旋转矩阵转换为 6 维旋转表示：
+        【中文】- 直接取旋转矩阵的前两行并展平为长度为 6 的向量；
+        【中文】- 这一表示常用于神经网络输出空间，因为它天然满足正交性约束，数值更稳定。
         """
         return rotation_matrix[:2, :].flatten()
 
@@ -463,7 +540,13 @@ class EndEffectorPose(Pose):
         rotation_order: Optional[str] = None,
         degrees: bool = True,
     ):
-        """Internal method to set rotation from various representations"""
+        """Internal method to set rotation from various representations.
+
+        【中文】内部方法：根据不同的输入旋转表示设置内部的 Rotation 对象：
+        【中文】- 根据 rotation_type 选择四元数 / 欧拉角 / 旋转向量 / 矩阵 / 6D 表示的解析路径；
+        【中文】- 对四元数会根据 rotation_order 处理 wxyz/xyzw 顺序转换；
+        【中文】- 设置完成后会将缓存的齐次矩阵标记为无效，等待下次访问时重算。
+        """
         rotation = np.array(rotation)
         rot_type = RotationType(rotation_type.lower())
 
@@ -503,47 +586,91 @@ class EndEffectorPose(Pose):
 
         Returns:
             Translation array - shape (3,)
+
+        【中文】获取当前末端位姿的平移向量 [x, y, z]：
+        【中文】- 返回的是内部副本的拷贝，调用方修改返回值不会影响内部状态；
+        【中文】- 常与 `rot6d`/`rotvec` 等一起拼接成网络输入特征。
         """
         return self._translation.copy()
 
     @property
     def quat_wxyz(self) -> np.ndarray:
-        """Get rotation as quaternion in wxyz order (w, x, y, z)"""
+        """Get rotation as quaternion in wxyz order (w, x, y, z).
+
+        【中文】以 wxyz 顺序返回旋转四元数（标量在前）：
+        【中文】- 便于与某些机器人中间件或控制栈对接，这些系统多采用 wxyz 约定；
+        【中文】- 内部会从 scipy 默认的 xyzw 顺序转换而来。
+        """
         return self.to_rotation("quat", "wxyz")
 
     @property
     def quat_xyzw(self) -> np.ndarray:
-        """Get rotation as quaternion in xyzw order (x, y, z, w)"""
+        """Get rotation as quaternion in xyzw order (x, y, z, w).
+
+        【中文】以 xyzw 顺序返回四元数（标量在后）：
+        【中文】- 这是 scipy Rotation 的默认输出格式；
+        【中文】- 适合直接与科学计算或学习框架交互。
+        """
         return self.to_rotation("quat", "xyzw")
 
     @property
     def euler_xyz(self) -> np.ndarray:
-        """Get rotation as Euler angles in xyz order (degrees)"""
+        """Get rotation as Euler angles in xyz order (degrees).
+
+        【中文】以 xyz 顺序返回欧拉角（默认单位为角度）：
+        【中文】- 对应按 X→Y→Z 依次旋转的欧拉角约定；
+        【中文】- 若需要弧度，可在 `to_rotation("euler", "xyz", degrees=False)` 中自行指定。
+        """
         return self.to_rotation("euler", "xyz")
 
     @property
     def rotvec(self) -> np.ndarray:
-        """Get rotation as rotation vector (axis-angle)"""
+        """Get rotation as rotation vector (axis-angle).
+
+        【中文】以旋转向量（轴-角）形式返回旋转：
+        【中文】- 向量方向表示旋转轴，模长表示旋转角度（弧度）；
+        【中文】- 这种表示在插值和优化中较为常见。
+        """
         return self.to_rotation("rotvec")
 
     @property
     def rotation_matrix(self) -> np.ndarray:
-        """Get rotation as 3x3 rotation matrix"""
+        """Get rotation as 3x3 rotation matrix.
+
+        【中文】以 3x3 旋转矩阵形式返回当前旋转：
+        【中文】- 适合与齐次变换或外部几何库对接；
+        【中文】- 也是构造 `homogeneous` 变换矩阵时使用的内部格式。
+        """
         return self.to_rotation("matrix")
 
     @property
     def rot6d(self) -> np.ndarray:
-        """Get rotation as 6D representation (first two rows of rotation matrix)"""
+        """Get rotation as 6D representation (first two rows of rotation matrix).
+
+        【中文】以 6 维向量形式返回旋转（旋转矩阵前两行展平）：
+        【中文】- 这一表示既能表示任意 SO(3) 旋转，又消除了四元数归一化等约束问题；
+        【中文】- 常用于神经网络的姿态回归任务中，数值稳定性更好。
+        """
         return self.to_rotation("rot6d")
 
     @property
     def xyz_rot6d(self) -> np.ndarray:
-        """Get pose as concatenated translation and 6D rotation (9,)"""
+        """Get pose as concatenated translation and 6D rotation (9,).
+
+        【中文】将平移向量和 6D 旋转拼接成长度为 9 的姿态向量 [x, y, z, rot6d...]：
+        【中文】- 这是本项目中常用的末端位姿数值表示形式；
+        【中文】- 方便直接作为网络输入或输出目标。
+        """
         return np.concatenate([self._translation, self.rot6d])
 
     @property
     def xyz_rotvec(self) -> np.ndarray:
-        """Get pose as concatenated translation and rotation vector (6,)"""
+        """Get pose as concatenated translation and rotation vector (6,).
+
+        【中文】将平移向量和旋转向量拼接成长度为 6 的姿态向量 [x, y, z, rx, ry, rz]：
+        【中文】- 适合需要轴-角形式的下游模块；
+        【中文】- 可视为 xyz + SO(3) 的另一种参数化方式。
+        """
         return np.concatenate([self._translation, self.rotvec])
 
     @property
@@ -553,6 +680,10 @@ class EndEffectorPose(Pose):
 
         Returns:
             Homogeneous matrix - shape (4, 4)
+
+        【中文】获取对应的 4x4 齐次变换矩阵：
+        【中文】- 上三行三列为旋转矩阵，最后一列前三个元素为平移向量；
+        【中文】- 为避免重复计算，内部使用缓存 `_homogeneous_cache`，当位姿更新时会自动失效重算。
         """
         if not self._cache_valid:
             self._homogeneous_cache = self._compute_homogeneous()
@@ -561,7 +692,13 @@ class EndEffectorPose(Pose):
         return self._homogeneous_cache.copy()
 
     def _compute_homogeneous(self) -> np.ndarray:
-        """Compute homogeneous transformation matrix"""
+        """Compute homogeneous transformation matrix.
+
+        【中文】根据当前内部的旋转和平移，显式构造 4x4 齐次变换矩阵：
+        【中文】- 旋转部分来自 `self._rotation.as_matrix()`；
+        【中文】- 平移部分来自 `self._translation`；
+        【中文】该方法仅在缓存失效时被调用，其结果会被缓存以提高后续访问效率。
+        """
         H = np.eye(4)
         H[:3, :3] = self._rotation.as_matrix()
         H[:3, 3] = self._translation
@@ -584,6 +721,11 @@ class EndEffectorPose(Pose):
             - Shape (3,) for euler/rotvec
             - Shape (6,) for rot6d
             - Shape (3, 3) for matrix
+
+        【中文】按指定的表示形式导出当前末端旋转：
+        【中文】- 通过 `rotation_type` 选择输出格式，必要时结合 `rotation_order` 指定顺序约定；
+        【中文】- 对欧拉角可通过 `degrees` 控制返回角度制或弧度制；
+        【中文】- 是本模块所有旋转 getter（如 quat_wxyz/euler_xyz）的底层实现。
         """
         rot_type = RotationType(rotation_type.lower())
 
@@ -619,6 +761,10 @@ class EndEffectorPose(Pose):
 
         Returns:
             Homogeneous matrix - shape (4, 4)
+
+        【中文】将当前位姿转换为 4x4 齐次变换矩阵的便捷接口：
+        【中文】- 等价于访问 `self.homogeneous` 属性；
+        【中文】- 便于在需要函数调用形式的场景中使用（例如与外部库接口对齐）。
         """
         return self.homogeneous
 
@@ -637,6 +783,10 @@ class EndEffectorPose(Pose):
             rotation_type: Type of rotation ("quat", "euler", "rotvec", "matrix", "rot6d")
             rotation_order: Order/convention for the rotation type
             degrees: For Euler angles, whether the input is in degrees (default True)
+
+        【中文】根据给定的旋转数据更新末端姿态：
+        【中文】- 会调用内部 `_set_rotation` 完成解析与缓存失效；
+        【中文】- 支持所有与构造函数相同的旋转表示，用于在运行中重设姿态朝向。
         """
         self._set_rotation(rotation, rotation_type, rotation_order, degrees)
 
@@ -652,6 +802,11 @@ class EndEffectorPose(Pose):
 
         Returns:
             EndEffectorPose representing the relative transformation
+
+        【中文】计算“从参考末端姿态 other 到当前姿态 self”的相对位姿：
+        【中文】- 先将两者转换为齐次矩阵 T_other 和 T_self；
+        【中文】- 再通过 T_other^{-1} @ T_self 得到在 other 坐标系下的位姿增量；
+        【中文】- 返回一个新的 EndEffectorPose 实例，表示这一步的相对运动，可用于相对动作编码。
         """
         # Get homogeneous matrices
         T_self = self.homogeneous
@@ -669,6 +824,10 @@ class EndEffectorPose(Pose):
 
         Returns:
             New EndEffectorPose instance with copied data
+
+        【中文】创建当前末端位姿的深拷贝：
+        【中文】- 拷贝平移向量与四元数旋转，生成一个新的 EndEffectorPose 实例；
+        【中文】- 新旧实例之间互不共享内部缓存或数组，适合在需要保存历史姿态时使用。
         """
         return EndEffectorPose(
             translation=self._translation.copy(),

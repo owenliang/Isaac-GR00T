@@ -7,6 +7,57 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from gr00t.data.interfaces import BaseProcessor, ShardedDataset
 
+# ============================================================================
+# 大白话说明：单个 ShardedDataset（single dataset） vs 混合数据集 ShardedMixtureDataset
+# ----------------------------------------------------------------------------
+# - 单个 ShardedDataset（例如 ShardedSingleStepDataset）：
+#   - 可以理解为“一个物理数据集”的封装，内部已经把所有 episode 按时间步切成了很多 shard；
+#   - 每个 shard 就是一小包样本列表，例如“这个数据集里有 3 个 1 万步的小分片”；
+#   - 调用 dataset.get_shard(i) 时，就会一次性把第 i 个 shard 的所有样本（已经过 Processor 处理）加载到内存。
+#
+# - ShardedMixtureDataset（本文件的类）：
+#   - 外面再套一层“总控”，把多个 ShardedDataset 按权重混在一起用来训练；
+#   - 它本身不关心具体样本长什么样，只负责：
+#       1）根据权重和 shard 大小，生成一个跨数据集的 (dataset_idx, shard_idx) 采样计划；
+#       2）按计划去调用底层 datasets[dataset_idx].get_shard(shard_idx) 拿到一个个 shard；
+#       3）在每个 shard 里打乱样本顺序，然后一个个 yield 出去给 DataLoader；
+#       4）在具身形态维度上，把所有底层数据集的统计量 merge 成一个“全局统计”，下发给 Processor 做统一归一化。
+#
+# - 统计量的颗粒度：
+#   - 每个 single dataset 内部，会先各自根据自身数据生成一份按模态/关节组划分的统计量（state/action/relative_action）。
+#   - ShardedMixtureDataset.merge_statistics 会按 embodiment_tag 分组，把“同一具身形态下的多个 dataset”的统计量按权重做加权合并，
+#     得到 per-embodiment 的全局统计字典；不同具身之间互不影响，各自归一化。
+#
+# - mixed dataset 如何取样本 + 分布式如何错开数据：
+#   - 第一步：先看每个底层 ShardedDataset 的平均 shard 长度，用 `权重 ÷ 平均 shard 长度` 得到“按 shard 采样”的归一化权重。
+#   - 第二步：用这些权重在 [0, num_datasets) 上做 `num_shards_per_epoch` 次随机采样，得到一个 dataset_idx 序列；
+#   - 第三步：对每个数据集各自打乱 shard 索引列表，当某个数据集被选中时，就从它的列表里弹出一个 shard_idx，
+#     形成最终的 (dataset_idx, shard_idx) 采样计划；
+#   - 第四步：在分布式 + 多 worker 场景下，先通过 `dist.get_world_size()/get_rank()` 拿到 world_size 和 rank，
+#     再通过 `get_worker_info()` 拿到 num_workers 和 worker_id，计算
+#         global_worker_id = rank * num_workers + worker_id
+#     然后枚举全局采样计划中的第 i 个 shard，只保留那些满足
+#         i % (world_size * num_workers) == global_worker_id
+#     的条目作为“本 worker 负责的 shard 列表”，这样可以保证不同 rank/worker 间 shard 不重叠、数据范围刚好错开。
+#
+# - DataLoader / 多 worker 是怎么组 batch 的：
+#   - 每个 DataLoader worker 进程都会各自持有一份 ShardedMixtureDataset 拷贝，在自己的进程里调用 `__iter__`，不断 yield “单样本字典”；
+#   - 主进程中的 DataLoader 从所有 worker 的队列里收样本，按 `batch_size` 聚合后再交给 `collate_fn` 组装成一个大 batch；
+#   - 因为 workers 之间不共享同一个 dataset 实例，所以不会出现多个 worker 并发修改同一个 `self.worker_shard_sampling_schedule` / `self.curr_shard_index` 这类属性的问题。
+#
+# - 关于 epoch 与重复采样的几个点：
+#   - `generate_shard_sampling_schedule` 在实例构造时会先生成一份“全局采样计划”（内部 epoch=0），再在每个 worker 内用取模过滤成 `worker_shard_sampling_schedule`，这一轮里各 worker 看到的 shard 子集是不重叠的；
+#   - 当某个 worker 把自己这轮的 shard 用完时，会在本地把 `self.epoch += 1`，并基于新的种子 `seed + self.epoch` 重新生成一份采样计划——这只是“dataset 内部的采样轮次”，与训练脚本外层的 epoch 计数无强绑定；
+#   - 不同 worker 的 `self.epoch` 可能略有不同步，但我们本来就允许“跨内部 epoch 重复访问同一个 shard”，相当于多轮训练中对同一数据多次采样；
+#   - 如果需要严格保证“整个训练过程中每个 (dataset_idx, shard_idx) 只被使用一次”，则需要更复杂的全局 Sampler 设计，这里采用的是工程上更简单实用的方案：保证一轮内 worker 间无冲突、多轮之间允许重复采样。
+#
+# - 总结一下关系：
+#   - ShardedDataset 负责“把单个物理数据集切成很多小分片，并能按 shard 取出样本”；
+#   - ShardedMixtureDataset 负责“在多个 ShardedDataset 之间按权重轮流选 shard，再把 shard 里的样本串成一个长流”。
+#   - 换句话说：底层单个数据集管好自己的 shard，上层混合数据集管“从哪个数据集、拿第几个 shard、以什么频率拿”，
+#     同时在具身层面合并统计量并在分布式场景下帮你把 shard 均匀分给各个进程/worker。
+# ============================================================================
+
 
 def merge_statistics(
     per_dataset_stats: list[dict[str, dict[str, list[float] | np.ndarray]]],
@@ -271,7 +322,7 @@ class ShardedMixtureDataset(IterableDataset):
         【中文】- 评估模式：遍历所有数据集的所有 shard，各采样一次，保证评估覆盖完整数据。
         """
         if self.training:
-            # 【训练模式】使用基于 epoch 的随机种子,确保每个 epoch 有不同的采样顺序
+            # 【训练模式】使用基于 epoch 的随机种子,确保每个 epoch 有不同但固定采样顺序
             rng = np.random.default_rng(self.seed + self.epoch)
 
             # ==================== 步骤 1: 计算每个数据集的平均 shard 大小 ====================
