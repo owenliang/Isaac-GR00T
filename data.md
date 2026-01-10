@@ -565,10 +565,10 @@ model_inputs = {
 1. **动作拼接**：
 
    ```python
-action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
-normalized_actions = torch.cat(
-    [torch.from_numpy(normalized_actions[key]) for key in action_keys], dim=-1
-)  # (action_horizon, action_dim)
+   action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
+   normalized_actions = torch.cat(
+       [torch.from_numpy(normalized_actions[key]) for key in action_keys], dim=-1
+   )  # (action_horizon, action_dim)
    ```
 
    - 然后 padding 到统一的 `max_action_dim` 和 `max_action_horizon`，并构造 `action_mask` 标记有效部分。
@@ -576,10 +576,10 @@ normalized_actions = torch.cat(
 2. **状态拼接**：
 
    ```python
-state_keys = self.modality_configs[embodiment_tag.value]["state"].modality_keys
-normalized_states = torch.cat(
-    [torch.from_numpy(normalized_states[key]) for key in state_keys], dim=-1
-)  # (T, state_dim)
+   state_keys = self.modality_configs[embodiment_tag.value]["state"].modality_keys
+   normalized_states = torch.cat(
+       [torch.from_numpy(normalized_states[key]) for key in state_keys], dim=-1
+   )  # (T, state_dim)
    ```
 
    - 只在特征维度上 padding 到 `max_state_dim`（时间维保持原长度）。
@@ -603,21 +603,21 @@ normalized_states = torch.cat(
    - 创建 Eagle 期望的 `conversation`：
 
      ```python
-conversation = [{
-  "role": "user",
-  "content": [
-    {"type": "text", "text": language},
-    {"type": "image", "image": pil_image_0},
-    ...
-  ],
-}]
+     conversation = [{
+       "role": "user",
+       "content": [
+         {"type": "text", "text": language},
+         {"type": "image", "image": pil_image_0},
+         ...
+       ],
+     }]
      ```
 
    - 用 `self.processor.apply_chat_template(..., tokenize=False)` 生成纯文本 prompt；
    - 返回：
 
      ```python
-{"vlm_content": {"text": text, "images": pil_images, "conversation": conversation}}
+     {"vlm_content": {"text": text, "images": pil_images, "conversation": conversation}}
      ```
 
 这个 `vlm_content` 会在 DataCollator 中被进一步喂入 VLM 的 AutoProcessor，得到真正的 `input_ids`、`pixel_values` 等张量。
