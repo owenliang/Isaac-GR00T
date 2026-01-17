@@ -56,8 +56,21 @@ class Gr00tN1d6ActionHead(nn.Module):
             )
             print("Using AlternateVLDiT for diffusion model")
         else:
+            '''
+            default_factory=lambda: {
+                "positional_embeddings": None,
+                "num_layers": 32,  # 32 layers instead of 16
+                "num_attention_heads": 32,
+                "attention_head_dim": 48,
+                "norm_type": "ada_norm",
+                "dropout": 0.2,
+                "final_dropout": True,
+                "output_dim": 1024,
+                "interleave_self_attention": True,
+            }
+            '''
             self.model = DiT(
-                **config.diffusion_model_cfg, cross_attention_dim=config.backbone_embedding_dim
+                **config.diffusion_model_cfg, cross_attention_dim=config.backbone_embedding_dim # 这里传入了VLM的output dim
             )
             print("Using DiT for diffusion model")
         

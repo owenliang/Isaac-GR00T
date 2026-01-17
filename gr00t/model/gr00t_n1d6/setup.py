@@ -32,6 +32,7 @@ def convert_tensors_to_lists(obj):
         return obj
 
 
+# 关键类，负责数据初始化
 class Gr00tN1d6Pipeline(ModelPipeline):
     """
     Gr00t N1.6 模型的训练 Pipeline。
@@ -67,6 +68,7 @@ class Gr00tN1d6Pipeline(ModelPipeline):
         """返回模型配置（Gr00tN1d6Config）。"""
         return self.config.model
 
+    # 关键方法，创建模型、数据集、collator
     def setup(self):
         """初始化 Pipeline 的核心组件：模型、数据集、collator。"""
         self.model = self._create_model()
@@ -215,7 +217,7 @@ class Gr00tN1d6Pipeline(ModelPipeline):
 
         self.processor = processor
         # 通过 DatasetFactory 构建数据集（支持多数据集混合、shard-based 加载）
-        dataset_factory = DatasetFactory(config=self.config)
+        dataset_factory = DatasetFactory(config=self.config) # 关键类，加载数据集
         train_dataset, eval_dataset = dataset_factory.build(processor=self.processor)
 
         # 保存数据集统计信息（均值、方差等，用于推理时反归一化）
