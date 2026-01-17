@@ -26,6 +26,16 @@ Example commands:
 NOTE: provide --model_path to load up the model checkpoint in this script,
         else it will use the default host and port via RobotInferenceClient
 
+【中文】脚本用途概览：
+- 离线 open-loop 推理与评估：在已有 LeRobot 轨迹数据上复现模型的预测动作，不与环境交互；
+- 支持两种 policy 来源：
+  - 本地加载 `Gr00tPolicy` 模型 (`--model_path` 不为空)；
+  - 通过 `PolicyClient` 连接远程推理服务器 (未提供 `--model_path` 时)；
+- 主要流程：
+  1. 从 checkpoint 或远程服务构建 policy；
+  2. 用 policy 的 modality_config 构造 `LeRobotEpisodeLoader` 数据集；
+  3. 对每条 episode，每隔 `action_horizon` 步抽取观测，调用 `policy.get_action` 得到一段动作轨迹；
+  4. 将预测动作展开到时间轴上，与 GT 动作拼接在一起，对齐后计算 MSE/MAE 并画图。
 """
 
 
@@ -109,6 +119,12 @@ def plot_trajectory_results(
 def parse_observation_gr00t(
     obs: dict[str, Any], modality_configs: dict[str, Any]
 ) -> dict[str, Any]:
+    """【中文】将原始观测字典整理为 Gr00tPolicy 期望的三模态结构。
+
+    - 输入 obs: 形如 {"state.x": ..., "video.front": ..., "annotation.human...": ...} 的扁平 key；
+    - 输入 modality_configs: 来自 policy 的 modality 配置, 提供每个模态下应该有哪些 key；
+    - 输出: {"video": {key: (B,T,...)}, "state": {...}, "language": {...}} 这样的嵌套结构, 可直接喂给 `policy.get_action`。
+    """
     new_obs = {}
     for modality in ["video", "state", "language"]:
         new_obs[modality] = {}
@@ -127,6 +143,12 @@ def parse_observation_gr00t(
 
 
 def parse_action_gr00t(action: dict[str, Any]) -> dict[str, Any]:
+    """【中文】将 policy 输出的 batched 动作解包, 并恢复 DataFrame 使用的前缀格式。
+
+    - 输入 action: 形如 {"left_arm": np.ndarray[(B,T,D)], "gripper": ...}；
+    - 这里假设 B=1, 因此取第 0 个 batch 维度, 得到 (T,D)；
+    - 输出: {"action.left_arm": (T,D), "action.gripper": ...}, 便于与 LeRobot 的 episode DataFrame 对齐。
+    """
     # Unbatch and add prefix
     return {f"action.{key}": action[key][0] for key in action}
 
@@ -141,6 +163,12 @@ def evaluate_single_trajectory(
     action_horizon=16,
     save_plot_path=None,
 ):
+    """【中文】在单条 episode 上做 open-loop 推理评估。
+
+    - 每隔 `action_horizon` 步抽一帧观测, 调用一次 `policy.get_action`, 得到一段长度为 horizon 的动作序列；
+    - 将所有预测的 horizon 片段沿时间展开成一条长序列, 与 GT action 对齐；
+    - 计算未归一化动作上的 MSE / MAE, 并画出 GT vs 预测曲线, 用红点标出每次推理发生的时间步。
+    """
     # Ensure steps doesn't exceed trajectory length
     traj = loader[traj_id]
     traj_length = len(traj)
@@ -264,6 +292,12 @@ class ArgsConfig:
 
 
 def main(args: ArgsConfig):
+    """【中文】脚本入口: 构建 policy 和数据集, 遍历若干条轨迹做推理评估。
+
+    - 若提供 `args.model_path`, 本地加载 Gr00tPolicy 模型; 否则通过 PolicyClient 连远程推理服务；
+    - 使用 policy 的 modality_config 构造 LeRobotEpisodeLoader, 保证数据字段与模型配置一致；
+    - 对 `args.traj_ids` 中的每个 traj 调用 `evaluate_single_trajectory`, 统计并打印整体 MSE/MAE。
+    """
     # Set up logging
     logging.basicConfig(level=logging.INFO)
 

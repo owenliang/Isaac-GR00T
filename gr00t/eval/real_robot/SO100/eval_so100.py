@@ -43,12 +43,19 @@ import numpy as np
 
 
 def recursive_add_extra_dim(obs: Dict) -> Dict:
-    """
-    Recursively add an extra dim to arrays or scalars.
+    """递归地给观测加额外维度, 对齐 GR00T Policy Server 的输入约定。
 
-    GR00T Policy Server expects:
-        obs: (batch=1, time=1, ...)
-    Calling this function twice achieves that.
+    目标：把原始形如
+        obs["video"][key]  ~  (H, W, C)
+        obs["state"][key]  ~  (D,)
+        obs["language"][key] ~ 标量字符串
+    转换成 GR00T 期望的
+        obs["video"][key]    ~ (B=1, T=1, H, W, C)
+        obs["state"][key]    ~ (B=1, T=1, D)
+        obs["language"][key] ~ [["instr"]]
+
+    本函数每调用一次, 对数组或标量外面包一层 batch/time 维;
+    这里调用两次, 最终形成 (1, 1, ...) 的形状, 与 `Gr00tPolicy.check_observation` 完全兼容。
     """
     for key, val in obs.items():
         if isinstance(val, np.ndarray):
@@ -94,8 +101,24 @@ class So100Adapter:
     # Observation → Model Input
     # -------------------------------------------------------------------------
     def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict:
-        """
-        Convert raw robot observation dict into the structured GR00T VLA input.
+        """将原始机器人观测转换为 GR00T VLA 输入格式。
+
+        目标：从 SO100 的原始字典
+            obs = {
+                "front": np.ndarray[(H, W, 3)],
+                "wrist": np.ndarray[(H, W, 3)],
+                "shoulder_pan.pos": float,
+                ...
+                "gripper.pos": float,
+                "lang": str,
+            }
+        构造出:
+            model_obs = {
+                "video": {"front": (1,1,H,W,3), "wrist": (1,1,H,W,3)},
+                "state": {"single_arm": (1,1,5), "gripper": (1,1,1)},
+                "language": {"annotation.human.task_description": [[lang_str]]},
+            }
+        其中形状与 `embodiment_configs.py` 中 SO100 的配置以及 `Gr00tPolicy` 的输入契约一致。
         """
         model_obs = {}
 
@@ -121,16 +144,21 @@ class So100Adapter:
     # Model Action Chunk → Robot Motor Commands
     # -------------------------------------------------------------------------
     def decode_action_chunk(self, chunk: Dict, t: int) -> Dict[str, float]:
-        """
-        chunk["single_arm"]: (B, T, 5)
-        chunk["gripper"]:    (B, T, 1)
+        """从模型动作 chunk 中取出第 t 个时间步, 还原为机器人每个关节的目标值。
 
-        Convert to:
+        输入 chunk 示例 (来自 `policy.get_action` 的返回):
+            chunk["single_arm"] ~ np.ndarray[(B=1, T, 5)]
+            chunk["gripper"]    ~ np.ndarray[(B=1, T, 1)]
+
+        输出 action_dict 示例 (供 `robot.send_action` 使用):
             {
-                "shoulder_pan.pos": val,
-                ...
+                "shoulder_pan.pos":  float,
+                "shoulder_lift.pos": float,
+                "elbow_flex.pos":    float,
+                "wrist_flex.pos":    float,
+                "wrist_roll.pos":    float,
+                "gripper.pos":       float,
             }
-        for timestep t.
         """
         single_arm = chunk["single_arm"][0][t]  # (5,)
         gripper = chunk["gripper"][0][t]  # (1,)
@@ -140,8 +168,11 @@ class So100Adapter:
         return {joint_name: float(full[i]) for i, joint_name in enumerate(self.robot_state_keys)}
 
     def get_action(self, obs: Dict) -> List[Dict[str, float]]:
-        """
-        Returns a list of robot motor commands (one per model timestep).
+        """根据当前观测, 预测一段动作序列, 返回每一时间步的关节命令列表。
+
+        - 输入 obs 形如 `robot.get_observation()` 的字典 (见 eval() 中注释示例);
+        - 内部调用 `obs_to_policy_inputs` 转为 (B=1, T=1, ...) 形状后, 通过 `PolicyClient.get_action` 请求远程 Gr00tPolicy；
+        - 返回值是长度为 horizon 的列表, 每个元素都是一份完整的关节目标字典, 可直接传给 `robot.send_action`。
         """
         model_input = self.obs_to_policy_inputs(obs)
         action_chunk, info = self.policy.get_action(model_input)
@@ -180,8 +211,15 @@ class EvalConfig:
 
 @draccus.wrap()
 def eval(cfg: EvalConfig):
-    """
-    Main entry point for real-robot policy evaluation.
+    """Main entry point for real-robot policy evaluation.
+
+    目标：在真实 SO100 / SO101 机器人上, 以 closed-loop 方式跑一整条语言条件任务。
+    - 步骤 1: 用 `make_robot_from_config(cfg.robot)` 初始化和连接真实机器人硬件；
+    - 步骤 2: 通过 `PolicyClient(policy_host, policy_port)` 连接远程 Gr00t 推理服务器, 用 `So100Adapter` 适配观测/动作；
+    - 步骤 3: 在一个 while True 控制循环中:
+      - 从 `robot.get_observation()` 读取当前传感器与关节状态, 加上语言指令 `cfg.lang_instruction`；
+      - 调用 `policy.get_action(obs)` 得到一段长度为 cfg.action_horizon 的动作序列；
+      - 以固定频率 (约 30Hz) 依次将每一步动作下发给 `robot.send_action` 执行, 实现真实 closed-loop 控制。
     """
     init_logging()
     logging.info(pformat(asdict(cfg)))
