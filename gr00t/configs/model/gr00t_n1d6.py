@@ -98,7 +98,9 @@ class Gr00tN1d6Config(PretrainedConfig):
     state_dropout_prob: float = 0.0  # State dropout probability
     state_additive_noise_scale: float = 0.0  # Scale for additive Gaussian noise on state features
 
+
     # Multi-embodiment parameters
+    # Determines the maximum number of embodiment types supported by encoder/decoder
     max_num_embodiments: int = 32
 
     def __init__(self, **kwargs):

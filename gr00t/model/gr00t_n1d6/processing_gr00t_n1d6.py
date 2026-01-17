@@ -86,7 +86,7 @@ class Gr00tN1d6DataCollator:
         # - tokenizer 的词表、special tokens 相同
         # - 图像预处理（resize、normalize）参数相同
         # - padding/truncation 策略一致
-        self.processor = build_processor(model_name, transformers_loading_kwargs)
+        self.processor = build_processor(model_name, transformers_loading_kwargs) # VLM的tokenizer
         
         # 【左侧 padding】Flash Attention 要求 padding 在左侧，因为：
         # - Flash Attention 从右向左处理序列
@@ -111,7 +111,7 @@ class Gr00tN1d6DataCollator:
         # ==================== 步骤 1: 收集所有样本的 key ====================
         # 【处理可选字段】不同样本可能包含不同的 key（如训练有 action，推理没有）
         # 使用 set.union 找出所有样本中出现过的 key
-        keys = list(set().union(*(elem.keys() for elem in features)))
+        keys = list(set().union(*(elem.keys() for elem in features)))  # 所有样本的特征keys，比如vlm_content,state,action...
 
         # ==================== 步骤 2: 逐 key 拼接 ====================
         for key in keys:
@@ -125,13 +125,18 @@ class Gr00tN1d6DataCollator:
                 #    "images": [PIL.Image, ...], 
                 #    "conversation": [{"role": "user", "content": [...]}]}
                 
+
+                # 【数据格式示例】
+                # text_list: ["pick up the cube", "move to the left", ...] (长度为 batch_size)
+                # image_inputs: [[PIL, PIL], [PIL, PIL], ...] (每个元素是该样本包含的所有图像)
                 text_list = []      # 收集所有样本的文本
                 image_inputs = []   # 收集所有样本的图像
                 
-                for v in values:
+                for v in values: # 所有样本的vlm_content
                     curr_text_list = [v["text"]]
-                    text_list += curr_text_list
+                    text_list += curr_text_list 
                     
+                    # 这段对eagle VLM backbone就无效了
                     curr_image_inputs = v["images"]
                     image_inputs += curr_image_inputs
 
@@ -139,19 +144,42 @@ class Gr00tN1d6DataCollator:
                 # Eagle 需要从 conversation 中解析图像位置和特殊 token
                 # 其他 VLM（如 LLaVA）可能直接使用 images 列表
                 if self.model_type == "eagle":
-                    image_inputs, _ = self.processor.process_vision_info(
+
+                    # 【Eagle VLM 处理逻辑】
+                    # 使用 processor.process_vision_info 从 conversation 结构中提取图像。
+                    # image_inputs 的返回格式为 List[List[PIL.Image.Image]]，即 [batch_size, num_images_per_sample]。
+                    image_inputs, _ = self.processor.process_vision_info( 
                         [v["conversation"] for v in values]
                     )
+                '''
+                        # Create conversation with images and text
+                        conversation = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": language},
+                                    *[{"type": "image", "image": img} for img in pil_images],
+                                ],
+                            }
+                        ]
+                '''
                 
                 # 【VLM Processor 编码】
                 # 输入：文本列表 + 图像列表
                 # 输出：input_ids（文本token）、attention_mask、pixel_values（图像张量）等
                 vlm_inputs = self.processor(
                     text=text_list, images=image_inputs, return_tensors="pt", padding=True
-                )
+                )   # 这就是tokenizer了
                 
                 # 将 VLM processor 输出的所有字段加入 batch
-                for k, v in vlm_inputs.items():
+
+                # 【VLM 结果合并】
+                # vlm_inputs 是一个 BatchFeature 对象（类似字典），包含编码后的张量：
+                # - input_ids: Tensor[B, L] - 文本 token 序列
+                # - attention_mask: Tensor[B, L] - 文本注意力掩码
+                # - pixel_values: Tensor[B, N, C, H, W] - 图像预处理后的张量 (N 为总图像数)
+                # 将这些字段逐一存入 batch 字典中
+                for k, v in vlm_inputs.items(): 
                     batch[k] = v
             elif key in ("pixel_values", "image_grid_thw", "attention_mask", "input_ids"):
                 raise Exception("Not implemented")
@@ -167,6 +195,18 @@ class Gr00tN1d6DataCollator:
                 #   输入：4 个 shape=(29,) 的 numpy array
                 #   输出：shape=(4, 29) 的 torch.Tensor
                 batch[key] = torch.from_numpy(np.stack(values))
+
+        # ==================== 最终输出结构 ====================
+        # 【输出示例】
+        # BatchFeature(data={"inputs": {
+        #     "input_ids": Tensor[B, L],         # 文本 token
+        #     "attention_mask": Tensor[B, L],    # 文本掩码
+        #     "pixel_values": Tensor[B, N, C, H, W], # 图像张量
+        #     "state": Tensor[B, T, 29],         # 状态
+        #     "action": Tensor[B, 40, 29],       # 动作
+        #     "action_mask": Tensor[B, 40, 29],  # 动作掩码
+        #     "embodiment_id": Tensor[B]         # 具身 ID
+        # }})
         return BatchFeature(data={"inputs": batch})
 
     def __str__(self):
