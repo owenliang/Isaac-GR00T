@@ -269,11 +269,29 @@ def __getitem__(self, idx: int) -> pd.DataFrame:
 
 一个简化示意表：
 
-| **t** | **state.single_arm**         | **action.single_arm**        | **language.task**          | **video.front** |
-|------:|-----------------------------|------------------------------|----------------------------|-----------------|
-| 0     | `[0.1, 0.2, 0.3, ...]`      | `[0.15, 0.25, 0.35, ...]`    | "cube into yellow bowl"   | Image / ndarray |
-| 1     | `[0.12, 0.22, 0.32, ...]`   | `[0.17, 0.27, 0.37, ...]`    | "cube into yellow bowl"   | Image / ndarray |
-| ...   | ...                         | ...                          | ...                        | ...             |
+| **t** | **state.single_arm**         | **action.single_arm**        | **action.gripper**          | **language.task**          | **video.front** |
+|------:|-----------------------------|------------------------------|-----------------------------|----------------------------|-----------------|
+| 0     | `[0.1, 0.2, 0.3, ...]`      | `[0.15, 0.25, 0.35, ...]`    | `[0.05]`                    | "cube into yellow bowl"   | Image / ndarray |
+| 1     | `[0.12, 0.22, 0.32, ...]`   | `[0.17, 0.27, 0.37, ...]`    | `[0.08]`                    | "cube into yellow bowl"   | Image / ndarray |
+| ...   | ...                         | ...                          | ...                         | ...                        | ...             |
+
+一个更贴近实现的「单行 Series」示例（以含 state/action/video/language 的 episode 为例）：
+
+```python
+row = df.iloc[0]
+
+# 数值模态：单步向量 (D,)
+row["state.left_arm"]      # np.ndarray, shape=(D_left_arm,)
+row["state.right_arm"]     # np.ndarray, shape=(D_right_arm,)
+row["action.left_arm"]     # np.ndarray, shape=(D_left_arm_action,)
+row["action.right_arm"]    # np.ndarray, shape=(D_right_arm_action,)
+
+# 语言模态：字符串
+row["language.annotation.human.task_description"]  # 如 "cube into yellow bowl"
+
+# 视频模态：单帧图像（np.ndarray 或 PIL.Image）
+row["video.ego_view"]      # 对应 t=0 的一帧图像
+```
 
 ### 2.4 语言与视频模态构造细节
 
@@ -375,6 +393,44 @@ def __getitem__(self, idx: int) -> pd.DataFrame:
    - `states` / `actions`：关节组名 → ndarray；
    - `text`：从语言模态中取出的字符串；
    - `embodiment`：构造时传入的 `EmbodimentTag`。
+
+一个典型的 `VLAStepData` 样例（以 `unitree_g1` 配置为例，`step_index = 10`）：
+
+```python
+vla = extract_step_data(episode_df, 10, modality_configs, embodiment_tag)
+
+vla.images = {
+    "ego_view": [  # len = len(video.delta_indices) = 1
+        np.ndarray(shape=(H, W, 3), dtype=np.uint8),
+    ],
+}
+
+vla.states = {
+    "left_leg":   np.ndarray(shape=(1, D_left_leg), dtype=np.float32),
+    "right_leg":  np.ndarray(shape=(1, D_right_leg), dtype=np.float32),
+    "waist":      np.ndarray(shape=(1, D_waist), dtype=np.float32),
+    "left_arm":   np.ndarray(shape=(1, D_left_arm), dtype=np.float32),
+    "right_arm":  np.ndarray(shape=(1, D_right_arm), dtype=np.float32),
+    "left_hand":  np.ndarray(shape=(1, D_left_hand), dtype=np.float32),
+    "right_hand": np.ndarray(shape=(1, D_right_hand), dtype=np.float32),
+}
+
+vla.actions = {
+    # action.delta_indices = [0, 1, ..., 29]
+    # ⇒ 时间维长度（action horizon） = 30
+    "left_arm":   np.ndarray(shape=(30, D_left_arm_action), dtype=np.float32),
+    "right_arm":  np.ndarray(shape=(30, D_right_arm_action), dtype=np.float32),
+    "left_hand":  np.ndarray(shape=(30, D_left_hand_action), dtype=np.float32),
+    "right_hand": np.ndarray(shape=(30, D_right_hand_action), dtype=np.float32),
+    "waist":      np.ndarray(shape=(30, D_waist_action), dtype=np.float32),
+}
+
+vla.text = "Pick up the red cube and put it into the bowl."
+```
+
+- **action horizon 的定义**：
+  - 从 `ModalityConfig` 视角：`len(action.delta_indices)` 就是模型实际看到的动作时间步数，即 `VLAStepData.actions[key].shape[0]`；
+  - 从时间覆盖视角：`max(delta_indices) - min(delta_indices) + 1`，在 `ShardedSingleStepDataset` 和 `LeRobotEpisodeLoader.create_language_from_meta` 中用于计算有效 episode 长度和子任务文本的覆盖范围（详见下文 4.3 中的公式）。
 
 ### 4.3 ShardedSingleStepDataset：把所有时间步均匀划分到多个 shard
 
