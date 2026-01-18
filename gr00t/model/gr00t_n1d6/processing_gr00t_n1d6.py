@@ -362,6 +362,7 @@ class Gr00tN1d6Processor(BaseProcessor):
         start_idx = 0
         joint_groups = self.modality_configs[embodiment_tag.value]["action"].modality_keys
         action_horizon = len(self.modality_configs[embodiment_tag.value]["action"].delta_indices)
+        # 遍理每个关节，从大action里面拆出来关节的action
         for key in joint_groups:
             joint_dim = self.state_action_processor.norm_params[embodiment_tag.value]["action"][
                 key
@@ -370,6 +371,7 @@ class Gr00tN1d6Processor(BaseProcessor):
             start_idx += joint_dim
 
         # Use StateActionProcessor to unnormalize and convert to absolute
+        # 拆开之后，使用 StateActionProcessor 进行反归一化和绝对动作转换
         return self.state_action_processor.unapply_action(
             out_dict, embodiment_tag.value, state=state
         )

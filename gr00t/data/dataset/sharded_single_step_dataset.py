@@ -48,6 +48,37 @@ def extract_step_data(
     step_data = {}
 
     # 遍历每个配置的模态，提取对应的数据
+    '''
+        ##### Pre-registered posttrain configurations #####
+        "unitree_g1": {
+            "video": ModalityConfig(
+                delta_indices=[0],
+                modality_keys=["ego_view"],
+            ),
+            "state": ModalityConfig(
+                delta_indices=[0],
+                modality_keys=[
+                    "left_leg",
+                    "right_leg",
+                    "waist",
+                    "left_arm",
+                    "right_arm",
+                    "left_hand",
+                    "right_hand",
+                ],
+            ),
+            "action": ModalityConfig(
+                delta_indices=list(range(30)),
+                modality_keys=[
+                    "left_arm",
+                    "right_arm",
+                    "left_hand",
+                    "right_hand",
+                    "waist",
+                    "base_height_command",
+                    "navigate_command",
+                ],
+    '''
     for modality, config in modality_configs.items():
         step_data[modality] = {}
         # 根据 delta_indices 配置计算需要采样的时间步索引
@@ -58,7 +89,7 @@ def extract_step_data(
             indices_to_load = [max(0, min(idx, len(episode_data) - 1)) for idx in indices_to_load]
         # 遍历该模态配置的所有数据键
         for key in config.modality_keys:
-            # 检查数据键是否存在于 DataFrame 中（列名格式为 "modality.key"）
+            # 检查数据键是否存在于 DataFrame 中（列名格式为 "modality.key"）,例如：state.left_arm, action.left_arm
             if f"{modality}.{key}" in episode_data.columns:
                 # 根据索引列表提取对应的数据
                 modality_data = episode_data[f"{modality}.{key}"].iloc[indices_to_load]

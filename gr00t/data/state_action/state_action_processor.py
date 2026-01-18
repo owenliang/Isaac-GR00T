@@ -453,10 +453,12 @@ class StateActionProcessor:
         【中文】- 第二步：若配置为相对动作且启用 use_relative_action，则结合给定状态，把相对动作还原为绝对动作轨迹；
         【中文】该接口常用于“把模型输出的归一化相对动作，转换成机器人可以直接执行的绝对关节/末端动作”。
         """
+
         # Step 1: Unnormalize actions
+        # 【中文】第一步：将动作值反归一化。
         unnormalized_values = {}
         modality_keys = self.modality_configs[embodiment_tag]["action"].modality_keys
-
+        
         for joint_group in modality_keys:
             if joint_group not in action:
                 raise KeyError(
@@ -466,18 +468,19 @@ class StateActionProcessor:
             params = self.norm_params[embodiment_tag]["action"][joint_group]
             group_values = action[joint_group]
 
-            if (
+            if ( # mean-std归一化
                 self.modality_configs[embodiment_tag]["action"].mean_std_embedding_keys is not None
                 and joint_group
                 in self.modality_configs[embodiment_tag]["action"].mean_std_embedding_keys
             ):
                 unnormalized = unnormalize_values_meanstd(group_values, params)
-            else:
+            else: # min-max归一化（默认）
                 unnormalized = unnormalize_values_minmax(group_values, params)
 
             unnormalized_values[joint_group] = unnormalized
 
         # Step 2: Convert relative actions to absolute (if needed)
+        # 【中文】第二步：如果配置了相对动作且启用，则将相对动作转换为绝对动作。
         action_configs = self.modality_configs[embodiment_tag]["action"].action_configs
 
         if action_configs is not None:
@@ -490,6 +493,7 @@ class StateActionProcessor:
                         )
 
                     # Determine which state key to use as reference
+                    # 【中文】确定用作参考系的状态键（默认为当前关节组键）。
                     state_key = action_config.state_key if action_config.state_key else key
 
                     if state_key not in state:
@@ -500,26 +504,37 @@ class StateActionProcessor:
 
                     relative_action = unnormalized_values[key]
 
+
                     # Handle batched and unbatched cases
+                    # 【中文】处理 batch 和非 batch 的情况，确保数据维度一致。
+                    # 使用 None (或 np.newaxis) 增加一个维度，将 (T, D) 转换为 (1, T, D)
                     is_batched = relative_action.ndim == 3
                     if not is_batched:
                         assert relative_action.ndim == 2
                         reference_state = state[state_key]
                         if reference_state.ndim == 2:
+                            # 将 (T_state, D) 转换为 (1, T_state, D)
                             reference_state = reference_state[None, :]
+                        # 将 (T, D) 转换为 (1, T, D)
                         relative_action = relative_action[None, :]
                     else:
                         reference_state = state[state_key]
                         if reference_state.ndim == 2:
+                            # 如果 action 是 batched (B, T, D) 但 state 只有 (T_state, D)
+                            # 则将 state 转换为 (1, T_state, D) 以便后续 zip 迭代
                             reference_state = reference_state[None, :]
 
                     # Convert batched relative actions to absolute
+                    # 【中文】将 batch 中的相对动作转换为绝对动作。
                     absolute_actions = []
                     for s, a in zip(reference_state, relative_action):
                         # Use last timestep of state as reference
+                        # 【中文】使用状态序列的最后一帧作为参考位姿。
+
+                        # 示例：a 的形状为 (T, D)，表示动作序列；s[-1] 的形状为 (D,)，表示参考状态（如末端位姿或关节角）
                         absolute_action = self._convert_to_absolute_action(
                             action=a,
-                            reference_state=s[-1],
+                            reference_state=s[-1], # 基于样本state horizon的最后时刻状态计算相对动作的绝对值
                             action_type=action_config.type,
                             action_format=action_config.format,
                         )
@@ -751,12 +766,14 @@ class StateActionProcessor:
                 f"Expected action dim 9 (xyz + rot6d) for EEF, got {action.shape[1]}"
             )
 
+            # action chunk
             rel_action = EndEffectorActionChunk(
                 [
                     EndEffectorPose(translation=m[:3], rotation=m[3:], rotation_type="rot6d")
-                    for m in action
+                    for m in action # 每个horizon转成xyz-rot6d
                 ]
             )
+            # reference state
             reference_frame = EndEffectorPose(
                 translation=reference_state[:3],
                 rotation=reference_state[3:],
@@ -764,7 +781,9 @@ class StateActionProcessor:
             )
 
         elif action_type == ActionType.NON_EEF:
+            # action chunk
             rel_action = JointActionChunk([JointPose(pose) for pose in action])
+            # reference state
             reference_frame = JointPose(reference_state)
 
         else:

@@ -753,8 +753,8 @@ class Gr00tN1d6(PreTrainedModel):
                 })
         """
         
-        # 注：推理代码不使用collator，所以需要在这里处理
-        if "vlm_content" in inputs: # 在推理时候，进来的是没经过collator处理的单条样本
+        # 不应该出现这个分支，VLM输入前面经过collator已经处理成input_ids
+        if "vlm_content" in inputs: #
             # 修复 n_envs > 1 的问题：处理所有环境的VLM内容
             vlm_content_list = inputs["vlm_content"]
             # Ensure vlm_content_list is always a list for consistent processing

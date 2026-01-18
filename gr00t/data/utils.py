@@ -154,6 +154,14 @@ def unnormalize_values_minmax(normalized_values, params):
     range_vals = max_vals - min_vals
 
     # Unnormalize from [-1, 1]
+
+    # 将 [-1, 1] 范围内的归一化值映射回原始范围 [min, max]
+    # 步骤：
+    # 1. np.clip(normalized_values, -1.0, 1.0): 确保输入值在预期范围内，处理由于浮点误差可能产生的越界值
+    # 2. + 1.0: 将 [-1, 1] 映射到 [0, 2]
+    # 3. / 2.0: 将 [0, 2] 映射到 [0, 1] (0-1 归一化)
+    # 4. * range_vals: 将 [0, 1] 缩放到原始的跨度大小 [0, max-min]
+    # 5. + min_vals: 平移到原始的最小值，得到最终的 [min, max]
     unnormalized = (np.clip(normalized_values, -1.0, 1.0) + 1.0) / 2.0 * range_vals + min_vals
     return unnormalized
 
