@@ -2,17 +2,50 @@
 
 ## 快速导航
 
-- [架构总览图](#架构总览图)
-- [GR00T N1.6 模型总览](#gr00t-n16-模型总览)
-- [数据流与模块关系](#数据流与模块关系)
-  - [Policy 层](#1-policy-层gr00tpolicy)
-  - [模型主体](#2-模型主体-gr00tn1d6)
-  - [Backbone 编码](#3-backboneeagle-vlm-编码)
-  - [动作头：流匹配扩散策略](#4-动作头流匹配扩散策略)
-- [模型输入输出接口](#模型级输入输出接口与形状)
-- [关键设计点详解](#关键设计点详解)
-- [典型使用示例](#典型输入输出样例从-policy-角度)
+- [模型结构与数据流](#架构总览图)
+  - [架构总览图](#架构总览图)
+    - [1. 高层数据流（Policy → Processor → Model → Actions）](#架构总览图)
+    - [2. 模型内部结构（Backbone + Action Head）](#架构总览图)
+  - [GR00T N1.6 模型总览](#gr00t-n16-模型总览)
+  - [数据流与模块关系](#数据流与模块关系)
+    - [1. 模型主体 `Gr00tN1d6`](#数据流与模块关系)
+    - [2. Backbone：Eagle VLM 编码](#数据流与模块关系)
+    - [3. 动作头：流匹配扩散策略](#数据流与模块关系)
+      - [3.1 子模块划分](#数据流与模块关系)
+      - [3.2 训练前向（`Gr00tN1d6ActionHead.forward`)](#数据流与模块关系)
+      - [3.3 推理前向（`Gr00tN1d6ActionHead.get_action`)](#数据流与模块关系)
+- [推理 Demo 流程](#推理-demo-流程从观测到动作)
+  - [1. 极简推理步骤](#推理-demo-流程从观测到动作)
+  - [2. 高层数据流（Policy → Processor → Model → Actions）](#推理-demo-流程从观测到动作)
+  - [3. 模型内部结构（Backbone + Action Head）](#推理-demo-流程从观测到动作)
+  - [4. 输入输出样例（从 Policy 角度）](#推理-demo-流程从观测到动作)
+    - [4.1 完整示例代码](#推理-demo-流程从观测到动作)
+    - [4.2 Policy 层输入输出与形状](#推理-demo-流程从观测到动作)
+    - [4.3 内部数据流详解](#推理-demo-流程从观测到动作)
+    - [4.4 直接使用底层模型接口](#推理-demo-流程从观测到动作)
+- [训练 Demo 流程](#训练-demo-流程从数据到-loss)
+  - [1. 训练数据流架构图](#训练-demo-流程从数据到-loss)
+  - [2. 极简训练步骤](#训练-demo-流程从数据到-loss)
+  - [3. 最小训练代码示例](#训练-demo-流程从数据到-loss)
+  - [4. 训练输入输出形状速览](#训练-demo-流程从数据到-loss)
+- [推理与训练细节](#关键设计点详解)
+  - [关键设计点详解](#关键设计点详解)
+    - [1. 为什么采用“流匹配（Flow Matching）”而不是普通 Diffusion？](#关键设计点详解)
+    - [2. 什么是 "AlternateVLDiT"？](#关键设计点详解)
+    - [3. 什么是 "Embodiment-Conditioned" 网络？](#关键设计点详解)
+    - [4. 为什么需要 `action_mask`？](#关键设计点详解)
+    - [5. 状态编码器中的 "state dropout" 是什么？](#关键设计点详解)
+    - [6. 推理时的 "4 步欧拉积分" 具体是怎么做的？](#关键设计点详解)
+  - [模型级输入输出接口与形状](#模型级输入输出接口与形状)
+    - [1. `Gr00tN1d6.forward`（训练/评估）](#模型级输入输出接口与形状)
+    - [2. `Gr00tN1d6.get_action`（推理）](#模型级输入输出接口与形状)
 - [总结](#总结如何快速记住-gr00t-n16-的架构)
+  - [一句话版本](#总结如何快速记住-gr00t-n16-的架构)
+  - [关键拆分：四层架构](#总结如何快速记住-gr00t-n16-的架构)
+  - [核心设计点回顾](#总结如何快速记住-gr00t-n16-的架构)
+  - [形状速查表](#总结如何快速记住-gr00t-n16-的架构)
+  - [快速定位代码](#总结如何快速记住-gr00t-n16-的架构)
+  - [学习路径建议](#总结如何快速记住-gr00t-n16-的架构)
 
 ---
 
@@ -77,6 +110,23 @@ GR00T N1.6 在代码中由 `Gr00tN1d6` 类实现（`gr00t/model/gr00t_n1d6/gr00t
     }
     ```
 
+  - **Collator 批处理后的样例输入（训练模式）**：
+
+    ```python
+    batch_inputs = {
+        # VLM 相关
+        "input_ids": LongTensor[B, S],              # 文本 token 索引
+        "attention_mask": LongTensor[B, S],         # 1=有效 token, 0=padding
+        "pixel_values": FloatTensor[B, T_v, C, H, W],  # 视频帧
+
+        # 动作头相关
+        "state": FloatTensor[B, T_s, max_state_dim],        # 归一化状态，右侧 padding
+        "action": FloatTensor[B, T_a, max_action_dim],      # 归一化动作，padding 到统一维度
+        "action_mask": FloatTensor[B, T_a, max_action_dim], # 1=真实动作, 0=padding
+        "embodiment_id": LongTensor[B],                     # 每个样本的具身形态 ID
+    }
+    ```
+
 - **关键超参（见 `gr00t/configs/model/gr00t_n1d6.py`）**：
   - `backbone_embedding_dim = 2048`：视觉-语言 token 的特征维度。
   - `max_state_dim = 29`：状态拼接后最大维度（按 embodiment 截取）。
@@ -86,88 +136,42 @@ GR00T N1.6 在代码中由 `Gr00tN1d6` 类实现（`gr00t/model/gr00t_n1d6/gr00t
   - `num_layers = 32`、`num_attention_heads = 32`（在 `diffusion_model_cfg` 中）：DiT 层数与头数。
   - `num_inference_timesteps = 4`、`num_timestep_buckets = 1000`：流匹配推理中时间步与离散桶数。
 
+- **`model.forward` 输出样例（训练/评估）**：
+
+  ```python
+  outputs = model.forward(batch_inputs)
+
+  # 典型内容（BatchFeature.data）
+  outputs = {
+      "loss": Tensor[],                          # 标量 loss
+      "action_loss": Tensor[B, T_a, D_action],   # 逐步/逐维 loss
+      "action_mask": Tensor[B, T_a, D_action],   # 与输入 action_mask 对齐
+      "backbone_features": Tensor[B, S, 2048],   # VLM 特征
+      "state_features": Tensor[B, T_s, 1536],    # state 特征
+  }
+  ```
+
 ---
 
 ## 数据流与模块关系
 
-这一节从 **Policy 级 API 输入** 到 **动作序列输出** 描述完整调用链，并给出形状关系。
+这一节主要作为 **训练 Demo** 的详细解释，重点从模型输入到 loss 描述数据流与模块关系。
+同时，Policy 层的数据流已在前面的“推理 Demo 流程”中说明，这里不再赘述。
 
-### 1. Policy 层（`Gr00tPolicy`）
-
-代码位置：[`gr00t/policy/gr00t_policy.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py)
-
-#### 输入：环境侧观测
-
-参见 [`getting_started/policy.md`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/getting_started/policy.md) 中说明，观测结构为：
-
-```python
-observation = {
-    "video": {
-        "camera_name": np.ndarray,  # (B, T_v, H, W, 3), uint8
-        # ... 多个相机
-    },
-    "state": {
-        "state_name": np.ndarray,   # (B, T_s, D_state), float32
-        # ... 多个状态流
-    },
-    "language": {
-        "task": [[str]],            # (B, 1)，每个样本一条指令
-    },
-}
+```mermaid
+flowchart LR
+    I["batch_inputs (dict)"] --> P["Gr00tN1d6.prepare_input"]
+    P --> B["EagleBackbone"]
+    P --> S["state, action, embodiment_id"]
+    P --> T["timestep (flow-matching)"]
+    B --> F["backbone_features"]
+    S --> A["Gr00tN1d6ActionHead"]
+    T --> A
+    F --> A
+    A --> O["outputs (loss, action_loss, features)"]
 ```
 
-**关键点说明**：
-- `B` = batch size，一次可以处理多个样本（例如多个机器人并行推理）；
-- `T_v` = 视频帧数，例如 4 帧历史观测；
-- `T_s` = 状态序列长度，通常与 `T_v` 相同；
-- `H, W = 256, 256`：图像分辨率（会在 Processor 中 resize）；
-- `D_state`：状态维度，例如 GR1 为 29 维（关节角 + 关节速度 + 抓手位置）。
-
-#### Gr00tPolicy 主要步骤
-
-调用 `Gr00tPolicy.get_action(observation)` 时：
-
-1. **`check_observation()`**：严格校验 video/state/language 的 dtype、维度、时间长度是否与 `modality_configs` 一致（见 [`gr00t_policy.py` L144–260](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py#L144-L260)）。
-   - 例如：检查 `video` 的 shape 是否为 `(B, T_v, H, W, 3)`，`state` 是否为 `(B, T_s, D)`。
-
-2. **`_unbatch_observation()`**：按 batch 维拆成多条单样本观测（便于处理器逐条构造 `VLAStepData`）。
-
-3. **`_to_vla_step_data()`**：把单条观测转换为 [`VLAStepData`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/data/types.py)，包含：
-   - `images`：每个相机的图像列表；
-   - `states`：每个状态流的数组；
-   - `text`：语言指令字符串；
-   - `embodiment`：具身形态标签。
-
-4. **使用 `AutoProcessor`**（实际是 [`Gr00tN1d6Processor`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/processing_gr00t_n1d6.py)）：
-   - 将 `VLAStepData` 序列化为模型输入张量（见 [data.md 的 Processor 章节](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/data.md#L513-L555) 的详细说明）。
-
-5. **调用 `self.model.get_action(model_inputs)`**：
-   - `self.model` 即 [`Gr00tN1d6`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py)；
-   - 返回 `BatchFeature(data={"action_pred": Tensor[B, action_horizon, action_dim], ...})`。
-
-6. **动作解码**：
-   - 将模型输出的归一化动作解码回物理单位（使用 `stats.json` 中的 mean/std）；
-   - 按照 `modality_configs[embodiment]` 的切片规则，拆分成多路动作流（例如 `{"joint_pos": ..., "gripper": ...}`）。
-
-#### 输出：环境可执行动作
-
-```python
-action = {
-    "action_name": np.ndarray,  # (B, T_a, D_action), float32 物理单位
-    # ... 每路 action key
-}
-info = {}  # 预留信息
-```
-
-其中 \(T_a\) 等于配置中的 `action_horizon`（缺省 16）。
-
-**大白话总结**：
-- Policy 层就是一个“翻译器”：
-  - **输入**：环境给的原始观测（图像、状态、文本）；
-  - **输出**：机器人可以直接执行的动作序列。
-- 中间调用了 Processor（数据预处理）和 Model（动作预测），并负责校验和解码。
-
-### 2. 模型主体 `Gr00tN1d6`
+### 1. 模型主体 `Gr00tN1d6`
 
 代码位置：[`gr00t/model/gr00t_n1d6/gr00t_n1d6.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py)
 
@@ -222,7 +226,7 @@ class Gr00tN1d6(PreTrainedModel):
   - 把状态、动作分给 action_head；
   - 最后把所有数据移到 GPU 上，准备计算。
 
-### 3. Backbone：Eagle VLM 编码
+### 2. Backbone：Eagle VLM 编码
 
 代码位置：[`gr00t/model/modules/eagle_backbone.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/modules/eagle_backbone.py)
 
@@ -270,11 +274,30 @@ BatchFeature(
   - 输出：一串 token，每个 token 都包含了视觉和语言的语义信息；
   - 这些 token 会传给动作头，帮助它决定该做什么动作。
 
-### 4. 动作头：流匹配扩散策略
+### 3. 动作头：流匹配扩散策略
 
 代码位置：[`gr00t/model/gr00t_n1d6/gr00t_n1d6.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py) 中 `Gr00tN1d6ActionHead`
 
-#### 4.1 子模块划分
+```mermaid
+flowchart LR
+    S["state (B, T_s, D_state)"] --> SE["state_encoder"]
+    SE --> SF["state_features (B, T_s, d_in)"]
+
+    A0["actions / noise (B, T_a, D_action)"] --> AE["action_encoder"]
+    T["timestep"] --> AE
+    AE --> AF["action_features (B, T_a, d_in)"]
+
+    SF --> CAT["concat(state_features, action_features)"]
+    AF --> CAT
+
+    CAT --> DIT["DiT / AlternateVLDiT"]
+    BF["backbone_features (B, S, D_b)"] --> DIT
+
+    DIT --> AD["action_decoder"]
+    AD --> O["predicted velocity / actions (B, T_a, D_action)"]
+```
+
+#### 3.1 子模块划分
 
 动作头由四个主要子模块组成：
 
@@ -291,6 +314,17 @@ BatchFeature(
 - 把各种不同维度的机器人状态（关节角、速度等）统一编码成固定维度的特征向量；
 - 每个 embodiment 有自己的 MLP 头，根据 `embodiment_id` 选择。
 
+**输入输出示例**：
+
+```python
+# 输入
+state: FloatTensor[B, T_s, D_state]      # 例如 B=8, T_s=1, D_state<=29
+embodiment_id: LongTensor[B]             # 每个样本一个 ID
+
+# 输出
+state_features: FloatTensor[B, T_s, d_in]  # d_in = input_embedding_dim = 1536
+```
+
 ##### (2) `action_encoder: MultiEmbodimentActionEncoder`
 
 - **代码位置**：同文件 [`embodiment_conditioned_mlp.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/modules/embodiment_conditioned_mlp.py)
@@ -304,6 +338,18 @@ BatchFeature(
 **大白话**：
 - 把动作轨迹编码成 token 序列，每个时间步的动作变成一个 token；
 - 同时嵌入时间信息（timestep），让模型知道当前处于流匹配的哪个阶段。
+
+**输入输出示例**：
+
+```python
+# 输入
+actions: FloatTensor[B, T_a, D_action]   # 例如 B=8, T_a=16
+timestep: LongTensor[B]                  # 离散化后的时间步
+embodiment_id: LongTensor[B]
+
+# 输出
+action_features: FloatTensor[B, T_a, d_in]  # d_in = input_embedding_dim = 1536
+```
 
 ##### (3) `model: DiT 或 AlternateVLDiT`
 
@@ -337,7 +383,7 @@ BatchFeature(
 **大白话**：
 - 把 DiT 输出的“抽象特征”映射回具体的动作维度（例如 16 维关节角）。
 
-#### 4.2 训练前向（`Gr00tN1d6ActionHead.forward`）
+#### 3.2 训练前向（`Gr00tN1d6ActionHead.forward`)
 
 训练时 `forward(backbone_output, action_input)` 的核心逻辑（见 [L148–256](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py#L148-L256)）：
 
@@ -451,7 +497,7 @@ loss = (action_loss * action_mask).sum() / action_mask.sum()  # 标量
 }
 ```
 
-#### 4.3 推理前向（`Gr00tN1d6ActionHead.get_action`）
+#### 3.3 推理前向（`Gr00tN1d6ActionHead.get_action`)
 
 推理时采用显式流匹配积分（见 [L288–365](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py#L288-L365)）：
 
@@ -513,9 +559,18 @@ return BatchFeature(data={
 
 ---
 
-## 端到端架构图
+## 推理 Demo 流程（从观测到动作）
 
-### 1. 高层数据流（Policy → Processor → Model → Actions）
+本节给出一个最小推理链路，从单次观测到多步动作序列，配合上文架构图快速对齐整体流程。
+
+### 1. 极简推理步骤
+
+1. **准备观测**：按 `getting_started/policy.md` 中的格式构造 `observation = {"video", "state", "language"}`。
+2. **创建 Policy**：通过 `Gr00tPolicy(model_path=..., embodiment_tag=..., device=...)` 加载模型与配置。
+3. **调用推理**：执行 `action, info = policy.get_action(observation)`。
+4. **下发控制**：从 `action` 字典中取出各路动作（如 `joint_pos`、`gripper`），发送到机器人控制器。
+
+### 2. 高层数据流（Policy → Processor → Model → Actions）
 
 ```mermaid
 flowchart TD
@@ -529,7 +584,7 @@ flowchart TD
     H --> I["环境可执行动作 action dict"]
 ```
 
-### 2. 模型内部结构（Backbone + Action Head）
+### 3. 模型内部结构（Backbone + Action Head）
 
 ```mermaid
 flowchart LR
@@ -546,6 +601,359 @@ flowchart LR
     DIT --> AD["action_decoder"]
     AD --> O1["action_pred (B, T_a, D_action)"]
 ```
+
+### 4. 输入输出样例（从 Policy 角度）
+
+以下例子展示从环境观测到最终动作的最小工作链路，对应代码集中于：
+- [`gr00t/policy/gr00t_policy.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py)
+- [`getting_started/policy.md`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/getting_started/policy.md)
+- [`gr00t/model/gr00t_n1d6/gr00t_n1d6.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py)
+
+#### 4.1 完整示例代码
+
+```python
+import numpy as np
+from gr00t.policy import Gr00tPolicy
+from gr00t.data.embodiment_tags import EmbodimentTag
+
+# ============================================================================
+# 1. 构造观测（示意形状）
+# ============================================================================
+B, T_v, T_s = 2, 4, 4  # batch=2, 视频帧数=4, 状态序列长度=4
+H, W, C = 256, 256, 3  # 图像分辨率
+D_state = 29           # GR1 状态维度
+
+observation = {
+    "video": {
+        # 前置相机：4 帧历史观测
+        "front_cam": np.zeros((B, T_v, H, W, C), dtype=np.uint8),
+        # 可以添加更多相机
+        # "wrist_cam": np.zeros((B, T_v, H, W, C), dtype=np.uint8),
+    },
+    "state": {
+        # 本体状态：关节角 + 关节速度 + 抓手位置
+        "proprio": np.zeros((B, T_s, D_state), dtype=np.float32),
+    },
+    "language": {
+        # 语言指令：每个样本一条
+        "task": [["pick the cube and place it in the bowl"] for _ in range(B)],
+    },
+}
+
+# ============================================================================
+# 2. 创建 Policy 并推理
+# ============================================================================
+policy = Gr00tPolicy(
+    model_path="/path/to/checkpoint",  # 预训练模型路径
+    embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,  # 指定具身形态
+    device="cuda:0",     # GPU 设备
+    strict=True,         # 严格模式：校验观测格式
+)
+
+# 推理
+action, info = policy.get_action(observation)
+
+# ============================================================================
+# 3. 动作结构（示意）
+# ============================================================================
+# action 是一个字典，按 embodiment 的 modality_configs 拆分成多路
+for name, arr in action.items():
+    # arr.shape -> (B, T_a, D_action_i)
+    print(f"{name}: {arr.shape}")
+    # 例如：
+    # joint_pos: (2, 16, 14)  # 14 维关节角
+    # gripper: (2, 16, 2)     # 2 维抓手
+
+# info 包含预留信息（当前为空）
+print(info)  # {}
+```
+
+#### 4.2 Policy 层输入输出与形状
+
+代码位置：[`gr00t/policy/gr00t_policy.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py)
+
+##### 输入：环境侧观测
+
+参见 [`getting_started/policy.md`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/getting_started/policy.md) 中说明，观测结构为：
+
+```python
+observation = {
+    "video": {
+        "camera_name": np.ndarray,  # (B, T_v, H, W, 3), uint8
+        # ... 多个相机
+    },
+    "state": {
+        "state_name": np.ndarray,   # (B, T_s, D_state), float32
+        # ... 多个状态流
+    },
+    "language": {
+        "task": [[str]],            # (B, 1)，每个样本一条指令
+    },
+}
+```
+
+**关键点说明**：
+- `B` = batch size，一次可以处理多个样本（例如多个机器人并行推理）；
+- `T_v` = 视频帧数，例如 4 帧历史观测；
+- `T_s` = 状态序列长度，通常与 `T_v` 相同；
+- `H, W = 256, 256`：图像分辨率（会在 Processor 中 resize）；
+- `D_state`：状态维度，例如 GR1 为 29 维（关节角 + 关节速度 + 抓手位置）。
+
+##### Gr00tPolicy 主要步骤
+
+调用 `Gr00tPolicy.get_action(observation)` 时：
+
+1. **`check_observation()`**：严格校验 video/state/language 的 dtype、维度、时间长度是否与 `modality_configs` 一致（见 [`gr00t_policy.py` L144–260](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py#L144-L260)）。
+   - 例如：检查 `video` 的 shape 是否为 `(B, T_v, H, W, 3)`，`state` 是否为 `(B, T_s, D)`。
+
+2. **`_unbatch_observation()`**：按 batch 维拆成多条单样本观测（便于处理器逐条构造 `VLAStepData`）。
+
+3. **`_to_vla_step_data()`**：把单条观测转换为 [`VLAStepData`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/data/types.py)，包含：
+   - `images`：每个相机的图像列表；
+   - `states`：每个状态流的数组；
+   - `text`：语言指令字符串；
+   - `embodiment`：具身形态标签。
+
+4. **使用 `AutoProcessor`**（实际是 [`Gr00tN1d6Processor`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/processing_gr00t_n1d6.py)）：
+   - 将 `VLAStepData` 序列化为模型输入张量（见 [data.md 的 Processor 章节](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/data.md#L513-L555) 的详细说明）。
+
+5. **调用 `self.model.get_action(model_inputs)`**：
+   - `self.model` 即 [`Gr00tN1d6`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py)；
+   - 返回 `BatchFeature(data={"action_pred": Tensor[B, action_horizon, action_dim], ...})`。
+
+6. **动作解码**：
+   - 将模型输出的归一化动作解码回物理单位（使用 `stats.json` 中的 mean/std）；
+   - 按照 `modality_configs[embodiment]` 的切片规则，拆分成多路动作流（例如 `{"joint_pos": ..., "gripper": ...}`）。
+
+##### 输出：环境可执行动作
+
+```python
+action = {
+    "action_name": np.ndarray,  # (B, T_a, D_action), float32 物理单位
+    # ... 每路 action key
+}
+info = {}  # 预留信息
+```
+
+其中 \(T_a\) 等于配置中的 `action_horizon`（缺省 16）。
+
+**大白话总结**：
+- Policy 层就是一个“翻译器”：
+  - **输入**：环境给的原始观测（图像、状态、文本）；
+  - **输出**：机器人可以直接执行的动作序列。
+- 中间调用了 Processor（数据预处理）和 Model（动作预测），并负责校验和解码。
+
+#### 4.3 内部数据流详解
+
+当你调用 `policy.get_action(observation)` 时，内部发生了以下过程：
+
+##### 步骤 1：校验观测
+
+```python
+# 检查 video 的 shape、dtype
+for camera_name, video_array in observation["video"].items():
+    assert video_array.shape == (B, T_v, H, W, C)
+    assert video_array.dtype == np.uint8
+
+# 检查 state 的 shape、dtype
+for state_name, state_array in observation["state"].items():
+    assert state_array.shape == (B, T_s, D_state)
+    assert state_array.dtype == np.float32
+
+# 检查 language 的结构
+assert observation["language"]["task"] == [[str] for _ in range(B)]
+```
+
+##### 步骤 2：转换为 VLAStepData
+
+```python
+from gr00t.data.types import VLAStepData
+
+vla_step_data = VLAStepData(
+    images={"front_cam": [PIL.Image, ...]},  # 转换为 PIL Image
+    states={"proprio": np.array},            # 保持 numpy
+    text="pick the cube and place it in the bowl",
+    embodiment=EmbodimentTag.NEW_EMBODIMENT,
+)
+```
+
+##### 步骤 3：Processor 处理
+
+```python
+from gr00t.model.gr00t_n1d6.processing_gr00t_n1d6 import Gr00tN1d6Processor
+
+processor = Gr00tN1d6Processor(...)
+model_inputs = processor([{"type": "episode_step", "content": vla_step_data}])
+
+# model_inputs 包含：
+model_inputs = {
+    "state": Tensor[T_s, 29],                 # 归一化后的状态
+    "vlm_content": {
+        "text": str,                           # 指令文本
+        "images": [Tensor],                    # 预处理后的图像
+        "conversation": [dict],                # Eagle 对话格式
+    },
+    "embodiment_id": int,                     # embodiment ID
+}
+```
+
+##### 步骤 4：模型推理
+
+```python
+# 在 model.get_action 内部：
+# 1. Collator 将 vlm_content 转换为 Eagle 输入
+backbone_inputs = collator([model_inputs["vlm_content"]])
+# -> {"input_ids": ..., "attention_mask": ..., "pixel_values": ...}
+
+# 2. Backbone 编码
+backbone_output = backbone(backbone_inputs)
+# -> {"backbone_features": Tensor[B, S, 2048], "image_mask": ...}
+
+# 3. Action Head 预测动作
+action_pred = action_head.get_action(backbone_output, model_inputs["state"])
+# -> Tensor[B, 16, D_action]  # 归一化后的动作
+```
+
+##### 步骤 5：动作解码
+
+```python
+# 1. 反归一化到物理单位
+from gr00t.data.stats import load_stats
+
+stats = load_stats("/path/to/stats.json", embodiment_tag)
+action_physical = action_pred * stats["action"]["std"] + stats["action"]["mean"]
+
+# 2. 按 modality_keys 拆分
+action_keys = modality_configs[embodiment_tag]["action"].modality_keys
+# 例如 ["joint_pos", "gripper"]
+
+action_dict = {}
+start_idx = 0
+for key in action_keys:
+    dim = action_dim_map[key]  # 例如 joint_pos=14, gripper=2
+    action_dict[key] = action_physical[:, :, start_idx:start_idx+dim]
+    start_idx += dim
+
+# action_dict = {
+#     "joint_pos": np.array (B, 16, 14),  # 关节角（弧度）
+#     "gripper": np.array (B, 16, 2),     # 抓手位置（米）
+# }
+```
+
+#### 4.4 直接使用底层模型接口
+
+如果你不需要 Policy 层的校验和解码，也可以直接操作 `Gr00tN1d6`：
+
+```python
+from gr00t.model import Gr00tN1d6
+from transformers import AutoProcessor
+
+# 加载模型和处理器
+model = Gr00tN1d6.from_pretrained("/path/to/checkpoint")
+processor = AutoProcessor.from_pretrained("/path/to/checkpoint")
+
+# 构造输入
+inputs = processor([vla_step_data])
+inputs = {k: torch.tensor(v).to("cuda") for k, v in inputs.items()}
+
+# 推理
+with torch.no_grad():
+    outputs = model.get_action(inputs)
+
+action_pred = outputs["action_pred"]  # Tensor[B, 16, D_action]
+
+# 后续需要自己解码
+```
+
+**推荐优先使用 `Gr00tPolicy`**，它封装了所有繁琐的校验、转换和解码逻辑，适合作为推理 Demo 的标准入口。
+
+---
+
+## 训练 Demo 流程（从数据到 loss）
+
+本节给出一个最小可运行的训练示例，展示从数据集到 `loss` 的端到端流程。
+
+### 1. 训练数据流架构图
+
+```mermaid
+flowchart TD
+    D["Dataset (episodes)"] --> P["Processor (Gr00tN1d6Processor)"]
+    P --> C["DataCollator (Gr00tN1d6DataCollator)"]
+    C --> M["Model.forward (Gr00tN1d6)"]
+    M --> L["loss / action_loss"]
+```
+
+### 2. 极简训练步骤
+
+1. **准备数据集**：将原始 episode 数据（视频、状态、文本）转换为 [`VLAStepData`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/data/types.py) 序列，或使用项目自带的数据集实现。
+2. **构建 Processor + Collator**：使用 [`Gr00tN1d6Processor`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/processing_gr00t_n1d6.py) 和 `Gr00tN1d6DataCollator` 将原始样本打包为模型输入张量。
+3. **前向与反向**：调用 `model.forward(inputs)` 得到 `outputs["loss"]`，然后 `loss.backward()`、`optimizer.step()`。
+4. **监控训练**：可根据 `outputs["action_loss"]`、`backbone_features` 等字段做可视化与调试。
+
+### 3. 最小训练代码示例
+
+```python
+from torch.utils.data import DataLoader
+from gr00t.model.gr00t_n1d6.gr00t_n1d6 import Gr00tN1d6
+from gr00t.configs.model.gr00t_n1d6 import Gr00tN1d6Config
+from gr00t.model.gr00t_n1d6.processing_gr00t_n1d6 import Gr00tN1d6Processor, Gr00tN1d6DataCollator
+
+# 1. 构建模型
+cfg = Gr00tN1d6Config()
+model = Gr00tN1d6(cfg).to("cuda")
+model.train()
+
+# 2. 构建 Processor 和 Collator（伪代码，具体参数参考 data.md）
+processor = Gr00tN1d6Processor(...)
+collator = Gr00tN1d6DataCollator(...)
+
+# 3. 构建 Dataset（伪代码）
+class EpisodeDataset:
+    def __len__(self):
+        return N
+
+    def __getitem__(self, idx):
+        # 返回一个 episode 或若干 step 的原始数据
+        return {"type": "episode_step", "content": vla_step_data}
+
+def collate_fn(batch):
+    # 使用 processor 将 batch 的原始数据转为中间格式
+    processed = processor(batch)
+    # 再用 collator 拼成张量
+    return collator(processed)
+
+train_loader = DataLoader(EpisodeDataset(), batch_size=8, shuffle=True, collate_fn=collate_fn)
+
+# 4. 训练循环（简化版）
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+for batch in train_loader:
+    batch = {k: v.to("cuda") if hasattr(v, "to") else v for k, v in batch.items()}
+
+    outputs = model.forward(batch)
+    loss = outputs["loss"]
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    print("loss =", loss.item())
+```
+
+### 4. 训练输入输出形状速览
+
+结合下文“模型级输入输出接口与形状”一节，训练场景下最关键的几个张量形状为：
+
+- **输入端**：
+  - **`input_ids` / `attention_mask` / `pixel_values`**：来自 Processor + Collator，用于 Eagle VLM。
+  - **`state`**：`FloatTensor[B, T_s, D_state]`，其中 `D_state ≤ max_state_dim`。
+  - **`action`**：`FloatTensor[B, T_a, D_action]`，`T_a = action_horizon`。
+  - **`embodiment_id`**：`LongTensor[B]`，指定具身形态。
+  - **`action_mask`**：`FloatTensor[B, T_a, D_action]`，用于忽略 padding 维度。
+- **输出端**：
+  - **`loss`**：标量，总训练目标。
+  - **`action_loss`**：`Tensor[B, T_a, D_action]`，便于分析每一步、每一维的拟合情况。
+  - **`backbone_features` / `state_features`**：可用于调试可视化。
 
 ---
 
@@ -759,195 +1167,6 @@ outputs["action_pred"]  # Tensor[B, action_horizon, action_dim]
 
 ---
 
-## 典型输入输出样例（从 Policy 角度）
-
-以下例子展示从环境观测到最终动作的最小工作链路，对应代码集中于：
-- [`gr00t/policy/gr00t_policy.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py)
-- [`getting_started/policy.md`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/getting_started/policy.md)
-- [`gr00t/model/gr00t_n1d6/gr00t_n1d6.py`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py)
-
-### 完整示例代码
-
-```python
-import numpy as np
-from gr00t.policy import Gr00tPolicy
-from gr00t.data.embodiment_tags import EmbodimentTag
-
-# ============================================================================
-# 1. 构造观测（示意形状）
-# ============================================================================
-B, T_v, T_s = 2, 4, 4  # batch=2, 视频帧数=4, 状态序列长度=4
-H, W, C = 256, 256, 3  # 图像分辨率
-D_state = 29           # GR1 状态维度
-
-observation = {
-    "video": {
-        # 前置相机：4 帧历史观测
-        "front_cam": np.zeros((B, T_v, H, W, C), dtype=np.uint8),
-        # 可以添加更多相机
-        # "wrist_cam": np.zeros((B, T_v, H, W, C), dtype=np.uint8),
-    },
-    "state": {
-        # 本体状态：关节角 + 关节速度 + 抓手位置
-        "proprio": np.zeros((B, T_s, D_state), dtype=np.float32),
-    },
-    "language": {
-        # 语言指令：每个样本一条
-        "task": [["pick the cube and place it in the bowl"] for _ in range(B)],
-    },
-}
-
-# ============================================================================
-# 2. 创建 Policy 并推理
-# ============================================================================
-policy = Gr00tPolicy(
-    model_path="/path/to/checkpoint",  # 预训练模型路径
-    embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,  # 指定具身形态
-    device="cuda:0",     # GPU 设备
-    strict=True,         # 严格模式：校验观测格式
-)
-
-# 推理
- action, info = policy.get_action(observation)
-
-# ============================================================================
-# 3. 动作结构（示意）
-# ============================================================================
-# action 是一个字典，按 embodiment 的 modality_configs 拆分成多路
-for name, arr in action.items():
-    # arr.shape -> (B, T_a, D_action_i)
-    print(f"{name}: {arr.shape}")
-    # 例如：
-    # joint_pos: (2, 16, 14)  # 14 维关节角
-    # gripper: (2, 16, 2)     # 2 维抓手
-
-# info 包含预留信息（当前为空）
-print(info)  # {}
-```
-
-### 内部数据流详解
-
-当你调用 `policy.get_action(observation)` 时，内部发生了以下过程：
-
-#### 步骤 1：校验观测
-
-```python
-# 检查 video 的 shape、dtype
-for camera_name, video_array in observation["video"].items():
-    assert video_array.shape == (B, T_v, H, W, C)
-    assert video_array.dtype == np.uint8
-
-# 检查 state 的 shape、dtype
-for state_name, state_array in observation["state"].items():
-    assert state_array.shape == (B, T_s, D_state)
-    assert state_array.dtype == np.float32
-
-# 检查 language 的结构
-assert observation["language"]["task"] == [[str] for _ in range(B)]
-```
-
-#### 步骤 2：转换为 VLAStepData
-
-```python
-from gr00t.data.types import VLAStepData
-
-vla_step_data = VLAStepData(
-    images={"front_cam": [PIL.Image, ...]},  # 转换为 PIL Image
-    states={"proprio": np.array},            # 保持 numpy
-    text="pick the cube and place it in the bowl",
-    embodiment=EmbodimentTag.NEW_EMBODIMENT,
-)
-```
-
-#### 步骤 3：Processor 处理
-
-```python
-from gr00t.model.gr00t_n1d6.processing_gr00t_n1d6 import Gr00tN1d6Processor
-
-processor = Gr00tN1d6Processor(...)
-model_inputs = processor([{"type": "episode_step", "content": vla_step_data}])
-
-# model_inputs 包含：
-model_inputs = {
-    "state": Tensor[T_s, 29],                 # 归一化后的状态
-    "vlm_content": {
-        "text": str,                           # 指令文本
-        "images": [Tensor],                    # 预处理后的图像
-        "conversation": [dict],                # Eagle 对话格式
-    },
-    "embodiment_id": int,                     # embodiment ID
-}
-```
-
-#### 步骤 4：模型推理
-
-```python
-# 在 model.get_action 内部：
-# 1. Collator 将 vlm_content 转换为 Eagle 输入
-backbone_inputs = collator([model_inputs["vlm_content"]])
-# -> {"input_ids": ..., "attention_mask": ..., "pixel_values": ...}
-
-# 2. Backbone 编码
-backbone_output = backbone(backbone_inputs)
-# -> {"backbone_features": Tensor[B, S, 2048], "image_mask": ...}
-
-# 3. Action Head 预测动作
-action_pred = action_head.get_action(backbone_output, model_inputs["state"])
-# -> Tensor[B, 16, D_action]  # 归一化后的动作
-```
-
-#### 步骤 5：动作解码
-
-```python
-# 1. 反归一化到物理单位
-from gr00t.data.stats import load_stats
-
-stats = load_stats("/path/to/stats.json", embodiment_tag)
-action_physical = action_pred * stats["action"]["std"] + stats["action"]["mean"]
-
-# 2. 按 modality_keys 拆分
-action_keys = modality_configs[embodiment_tag]["action"].modality_keys
-# 例如 ["joint_pos", "gripper"]
-
-action_dict = {}
-start_idx = 0
-for key in action_keys:
-    dim = action_dim_map[key]  # 例如 joint_pos=14, gripper=2
-    action_dict[key] = action_physical[:, :, start_idx:start_idx+dim]
-    start_idx += dim
-
-# action_dict = {
-#     "joint_pos": np.array (B, 16, 14),  # 关节角（弧度）
-#     "gripper": np.array (B, 16, 2),     # 抓手位置（米）
-# }
-```
-
-### 直接使用底层模型接口
-
-如果你不需要 Policy 层的校验和解码，也可以直接操作 `Gr00tN1d6`：
-
-```python
-from gr00t.model import Gr00tN1d6
-from transformers import AutoProcessor
-
-# 加载模型和处理器
-model = Gr00tN1d6.from_pretrained("/path/to/checkpoint")
-processor = AutoProcessor.from_pretrained("/path/to/checkpoint")
-
-# 构造输入
-inputs = processor([vla_step_data])
-inputs = {k: torch.tensor(v).to("cuda") for k, v in inputs.items()}
-
-# 推理
-with torch.no_grad():
-    outputs = model.get_action(inputs)
-
-action_pred = outputs["action_pred"]  # Tensor[B, 16, D_action]
-
-# 后续需要自己解码
-```
-
-**推荐使用 `Gr00tPolicy`**，它封装了所有繁琐的校验、转换和解码逻辑。
 
 ---
 
