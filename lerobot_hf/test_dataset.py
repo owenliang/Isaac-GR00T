@@ -99,7 +99,7 @@ modality_config={
 register_modality_config(modality_config, EmbodimentTag.NEW_EMBODIMENT)
 # 生成相对统计
 generate_rel_stats('./demo_data/svla_so101_pickplace',EmbodimentTag.NEW_EMBODIMENT)
-# 加载原始dataframe
+# 加载数据集
 lerobot_episode_loader=LeRobotEpisodeLoader(
     './demo_data/svla_so101_pickplace',
     modality_config,
@@ -107,7 +107,7 @@ lerobot_episode_loader=LeRobotEpisodeLoader(
 )
 print(f'Number of episodes: {len(lerobot_episode_loader)}')
 print(f'episode 0: {lerobot_episode_loader[0]}')
-# 取1个episode中的1个step，加工成1条样本（也就是合成action horizon)
+# 取1个episode dataframe的1个step，加工成1条样本（也就是合成action horizon)
 episode0_df = lerobot_episode_loader[0]
 vla_step_data = extract_step_data(episode_data=episode0_df,step_index=100,modality_configs=modality_config,embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
 print(f'vla_step_data: {vla_step_data}')
