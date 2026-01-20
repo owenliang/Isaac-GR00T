@@ -12,6 +12,9 @@ Usage examples
 
 from __future__ import annotations
 
+import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 import argparse
 from collections import defaultdict
 import logging
