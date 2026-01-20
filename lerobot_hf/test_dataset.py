@@ -109,7 +109,7 @@ print(f'Number of episodes: {len(lerobot_episode_loader)}')
 print(f'episode 0: {lerobot_episode_loader[0]}')
 # 取1个episode中的1个step，加工成1条样本（也就是合成action horizon)
 episode0_df = lerobot_episode_loader[0]
-vla_step_data = extract_step_data(episode_data=episode0_df,step_index=0,modality_configs=modality_config,embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
+vla_step_data = extract_step_data(episode_data=episode0_df,step_index=100,modality_configs=modality_config,embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
 print(f'vla_step_data: {vla_step_data}')
 
 # 初始化processor（modality_configs键必须为字符串）
@@ -117,8 +117,8 @@ statistics = lerobot_episode_loader.get_dataset_statistics()
 config = get_default_config()
 
 processor = Gr00tN1d6Processor(
-    modality_configs={EmbodimentTag.NEW_EMBODIMENT.value: modality_config},  # 使用.value转为字符串
-    statistics={EmbodimentTag.NEW_EMBODIMENT.value: statistics},  # 使用.value转为字符串
+    modality_configs={EmbodimentTag.NEW_EMBODIMENT.value: modality_config},  
+    statistics={EmbodimentTag.NEW_EMBODIMENT.value: statistics},  
     image_crop_size=config.model.image_crop_size,
     image_target_size=config.model.image_target_size,
     random_rotation_angle=config.model.random_rotation_angle,
