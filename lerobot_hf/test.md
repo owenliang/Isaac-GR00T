@@ -430,7 +430,184 @@ tensor([
 
 ---
 
-## 5. 数据流总结
+## 5. Collator 批处理
+
+### 5.1 Collator 的作用
+
+**目标**: 将多个 `processed_data` 样本组装成模型可直接输入的 batch 格式。
+
+```python
+batch = processor.collator([processed_data1, processed_data2, ...])
+```
+
+**DataCollator 是 DataLoader 和模型之间的桥梁**，负责：
+1. 将列表形式的样本转换为批量张量
+2. 对不同模态使用不同的拼接策略
+3. 确保 batch 内所有样本的张量维度对齐
+
+### 5.2 Collator 处理流程
+
+#### 步骤1: 收集所有样本的 key
+
+```python
+keys = list(set().union(*(elem.keys() for elem in features)))
+```
+
+**处理可选字段**: 不同样本可能包含不同的 key（如训练时有 action，推理时没有）
+
+#### 步骤2: VLM 内容特殊处理
+
+对于 `vlm_content` 字段，需要特殊处理：
+
+```python
+if key == "vlm_content":
+    # 1. 收集所有样本的文本和图像
+    text_list = [v["text"] for v in values]
+    image_inputs, _ = processor.process_vision_info([v["conversation"] for v in values])
+    
+    # 2. 调用 VLM processor 进行 tokenization
+    vlm_inputs = processor(
+        text=text_list, 
+        images=image_inputs, 
+        return_tensors="pt", 
+        padding=True
+    )
+    
+    # 3. 将 VLM 输出的所有字段加入 batch
+    for k, v in vlm_inputs.items():
+        batch[k] = v
+```
+
+**VLM Processor 输出**:
+- `input_ids`: 文本 token 序列
+- `attention_mask`: 文本注意力掩码
+- `pixel_values`: 图像预处理后的张量（列表格式，每个视角一个）
+- `image_sizes`: 原始图像尺寸
+
+**关键操作**:
+- **Tokenization**: 将文本转换为 token IDs
+- **Padding**: 统一序列长度（左侧 padding，兼容 Flash Attention）
+- **图像编码**: 调用 Eagle backbone 的 image processor
+
+#### 步骤3: 数值模态直接堆叠
+
+对于 `state`, `action`, `action_mask`, `embodiment_id` 等数值字段：
+
+```python
+else:
+    batch[key] = torch.from_numpy(np.stack(values))
+```
+
+**堆叠逻辑**:
+- 输入: `[array[D], array[D], ...]` (batch_size 个)
+- `np.stack`: 堆叠成 `[B, D]`
+- `torch.from_numpy`: 转为 PyTorch 张量
+
+**示例**: batch_size=4, state_dim=29
+- 输入: 4个 shape=(1, 29) 的 array
+- 输出: shape=(4, 1, 29) 的 Tensor
+
+### 5.3 Collator 输出结构
+
+基于运行 `test_dataset.py` 的实际输出：
+
+```python
+batch = {
+    'inputs': {
+        # === VLM 文本输入 ===
+        'input_ids': torch.Size([1, 254]),           # (B, seq_len) Token IDs
+        'attention_mask': torch.Size([1, 254]),      # (B, seq_len) Attention掩码
+        
+        # === VLM 图像输入 ===
+        'pixel_values': [                            # List of tensors (每个视角一个)
+            torch.Size([1, 3, 252, 336]),            # (B, C, H, W) 视角1
+            torch.Size([1, 3, 252, 336])             # (B, C, H, W) 视角2
+        ],
+        'image_sizes': torch.Size([2, 2]),           # (num_images, 2) [[H1,W1], [H2,W2]]
+        
+        # === 状态/动作 ===
+        'state': torch.Size([1, 1, 29]),             # (B, T, D) 归一化状态
+        'action': torch.Size([1, 16, 29]),           # (B, T, D) 归一化相对动作
+        'action_mask': torch.Size([1, 16, 29]),      # (B, T, D) 有效维度标记
+        
+        # === 本体标识 ===
+        'embodiment_id': torch.Size([1]),            # (B,) 本体ID
+    }
+}
+```
+
+### 5.4 关键字段详解
+
+#### VLM 文本字段
+
+| 字段 | 形状 | Dtype | 说明 |
+|------|------|-------|------|
+| `input_ids` | (B, seq_len) | int64 | Tokenized 文本ID序列 |
+| `attention_mask` | (B, seq_len) | int64 | 标记有效token(1)和padding(0) |
+
+**序列构成** (本例 seq_len=254):
+```
+<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
+<|im_start|>user\npink lego brick into the transparent box
+<image-1><image-2><|im_end|>\n
+```
+
+#### VLM 图像字段
+
+| 字段 | 形状 | Dtype | 说明 |
+|------|------|-------|------|
+| `pixel_values` | List[Tensor] | float32 | 每个视角一个张量 |
+| `image_sizes` | (num_images, 2) | int64 | 原始图像尺寸 |
+
+**pixel_values 为何是列表？**
+- 不同视角的图像可能经过不同的预处理
+- Eagle backbone 需要独立处理每个视角
+- 保留灵活性以支持动态数量的视角
+
+**图像预处理** (由 Eagle processor 完成):
+- 原始尺寸: 340×256
+- 预处理后: 336×252
+- 通道顺序: RGB (3 channels)
+
+#### 状态/动作字段
+
+| 字段 | 形状 | Dtype | 说明 |
+|------|------|-------|------|
+| `state` | (B, T_state, D) | float32 | 当前归一化状态 |
+| `action` | (B, T_action, D) | float32 | 未来归一化相对动作 |
+| `action_mask` | (B, T_action, D) | float32 | 标记有效维度(1.0)和padding(0.0) |
+
+**维度说明**:
+- `B`: Batch size (本例=1)
+- `T_state`: 状态时间步 (本例=1，单步状态)
+- `T_action`: Action horizon (本例=16，预测未来16步)
+- `D`: 统一维度 (本例=29，实际6维+23维padding)
+
+#### 本体标识
+
+| 字段 | 形状 | Dtype | 说明 |
+|------|------|-------|------|
+| `embodiment_id` | (B,) | int32 | 本体类型ID，用于多本体训练 |
+
+**本体ID映射**:
+```python
+EmbodimentTag.NEW_EMBODIMENT → embodiment_id = 10
+```
+
+### 5.5 Collator 与 Processor 的分工
+
+| 组件 | 职责 | 输入 | 输出 |
+|------|------|------|------|
+| **Processor** | 单样本预处理 | VLAStepData (原始数据) | processed_data (单样本) |
+| **Collator** | Batch 组装 | List[processed_data] | batch (批量张量) |
+
+**关键区别**:
+- **Processor**: 处理单个样本，负责归一化、相对动作转换、图像变换
+- **Collator**: 处理多个样本，负责 padding、堆叠、VLM tokenization
+
+---
+
+## 6. 数据流总结
 
 ```mermaid
 graph TD
@@ -446,12 +623,17 @@ graph TD
     H --> K[processed_data]
     I --> K
     J --> K
-    K --> L[模型输入<br/>state/action/vlm_content]
+    K --> L[Collator批处理]
+    L --> M[VLM Tokenization<br/>文本+图像编码]
+    L --> N[数值堆叠<br/>state/action/mask]
+    M --> O[batch inputs]
+    N --> O
+    O --> P[模型 Forward]
 ```
 
 ---
 
-## 6. 关键配置对照表
+## 7. 关键配置对照表
 
 | 配置项 | 原始值 | 处理后维度 | 说明 |
 |--------|--------|-----------|------|
@@ -469,23 +651,23 @@ graph TD
 
 ---
 
-## 7. 典型应用场景
+## 8. 典型应用场景
 
-### 7.1 训练时
+### 8.1 训练时
 - **输入**: `processed_data` (包含action GT)
 - **输出**: 模型预测action，计算loss
 - **action_mask**: 用于屏蔽padding区域的loss
 
-### 7.2 推理时
+### 8.2 推理时
 - **输入**: `processed_data` (不含action)
 - **输出**: 模型生成16步action预测
 - **解码**: `processor.decode_action()` 反归一化+相对→绝对
 
 ---
 
-## 8. 常见问题与注意事项
+## 9. 常见问题与注意事项
 
-### 8.1 键类型对齐
+### 9.1 键类型对齐
 ❌ **错误**:
 ```python
 modality_configs={EmbodimentTag.NEW_EMBODIMENT: ...}  # 枚举对象
@@ -496,7 +678,7 @@ modality_configs={EmbodimentTag.NEW_EMBODIMENT: ...}  # 枚举对象
 modality_configs={EmbodimentTag.NEW_EMBODIMENT.value: ...}  # 字符串 'new_embodiment'
 ```
 
-### 8.2 相对动作处理顺序（重要！）
+### 9.2 相对动作处理顺序（重要！）
 
 **训练时处理步骤**：
 ```python
@@ -521,14 +703,14 @@ action_absolute = action_relative + state[-1]
 - `action_configs` 中设置 `rep=ActionRepresentation.RELATIVE`
 - 必须提供 `state` 作为参考系
 
-### 8.3 视频后端选择
+### 9.3 视频后端选择
 - **Windows**: 推荐 `decord` (兼容性好)
 - **Linux**: 推荐 `torchcodec` (性能优)
 - **通用**: `pyav` 或 `ffmpeg` (稳定但较慢)
 
 ---
 
-## 9. 性能优化建议
+## 10. 性能优化建议
 
 1. **批处理**: 使用 `DataLoader` + `collator` 批量处理多个样本
 2. **缓存统计量**: `statistics` 在 processor 初始化时一次性加载
@@ -537,6 +719,369 @@ action_absolute = action_relative + state[-1]
 
 ---
 
-**文档版本**: v1.0  
+**文档版本**: v1.1  
+**更新时间**: 2026-01-20  
+**测试代码**: `lerobot_hf/test_dataset.py`
+
+---
+
+## 11. 模型推理：Flow Matching 动作生成
+
+### 11.1 Flow Matching 原理
+
+**Flow Matching** 是一种基于 ODE（常微分方程）的生成模型，训练时学习从噪声到数据的"速度场"。
+
+#### 核心思想
+
+1. **训练阶段**：学习速度场 `v(x, t)`
+   - 输入：带噪声的动作 `x_t` 和时间步 `t`
+   - 输出：速度场（表示如何从噪声流向真实动作）
+
+2. **推理阶段**：通过 ODE 积分生成动作
+   - ODE 方程：`dx/dt = v(x, t)`
+   - 初始条件：`x(0) = noise ~ N(0, I)`
+   - 终点：`x(1) = action`（真实动作）
+
+#### 欧拉积分法
+
+采用一阶欧拉法数值求解 ODE：
+
+```python
+x_{n+1} = x_n + dt · v(x_n, t_n)
+```
+
+其中 `dt = 1 / num_inference_timesteps`
+
+**推理步数的影响**:
+- 步数越多：积分越精确，动作质量越好，但速度越慢
+- 步数越少：速度快，但可能欠拟合
+- 典型值：训练时 1000 步，推理时 10-50 步
+
+### 11.2 推理流程详解
+
+代码位置：[`gr00t_n1d6.py#L478-597`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/gr00t_n1d6.py#L478-L597)
+
+```python
+@torch.no_grad()
+def get_action_with_features(
+    self,
+    backbone_features: torch.Tensor,      # VLM 输出的视觉语言特征
+    state_features: torch.Tensor,         # 编码后的状态特征
+    embodiment_id: torch.Tensor,          # 本体 ID
+    backbone_output: BatchFeature,        # VLM 完整输出（含 mask）
+) -> BatchFeature:
+```
+
+#### 步骤1: 初始化为高斯噪声
+
+```python
+# x(0) ~ N(0, I)
+actions = torch.randn(
+    size=(batch_size, action_horizon, action_dim),
+    dtype=torch.bfloat16,
+    device='cuda'
+)
+```
+
+**输出示例**:
+```python
+actions: torch.Size([1, 16, 29])  # (B, T, D)
+# 初始值为随机噪声，均值≈0，标准差≈1
+```
+
+#### 步骤2: 设置积分参数
+
+```python
+dt = 1.0 / num_inference_timesteps  # 例如：1/10 = 0.1
+```
+
+**时间轴**:
+```
+t=0.0 → t=0.1 → t=0.2 → ... → t=0.9 → t=1.0
+(噪声)                                  (真实动作)
+```
+
+#### 步骤3: 迭代去噪（核心循环）
+
+```python
+for t in range(num_inference_timesteps):  # 例如：t = 0, 1, 2, ..., 9
+    # 3.1 计算连续时间
+    t_cont = t / float(num_inference_timesteps)  # 0.0, 0.1, 0.2, ..., 0.9
+    t_discretized = int(t_cont * num_timestep_buckets)  # 映射到 bucket 索引
+    
+    # 3.2 编码当前动作 + 时间步
+    timesteps_tensor = torch.full((batch_size,), t_discretized)
+    action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+    # action_features: [B, 16, 512]  (假设 embedding_dim=512)
+    
+    # 3.3 添加位置编码
+    if self.config.add_pos_embed:
+        pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+        action_features = action_features + pos_embs
+    
+    # 3.4 拼接状态和动作特征
+    sa_embs = torch.cat((state_features, action_features), dim=1)
+    # sa_embs: [B, 1+16, 512] = [B, 17, 512]
+    
+    # 3.5 通过 DiT 预测速度场
+    model_output = self.model(
+        hidden_states=sa_embs,
+        encoder_hidden_states=backbone_features,  # VLM 特征
+        timestep=timesteps_tensor,
+    )
+    # model_output: [B, 17, 512]
+    
+    # 3.6 解码为速度场
+    pred = self.action_decoder(model_output, embodiment_id)
+    # pred: [B, 17, 29]
+    
+    # 3.7 提取动作部分的速度场
+    pred_velocity = pred[:, -action_horizon:]  # 取后 16 步
+    # pred_velocity: [B, 16, 29]
+    
+    # 3.8 欧拉积分更新
+    actions = actions + dt * pred_velocity
+    # 沿着速度场方向移动一小步
+```
+
+**每次迭代的变化**:
+
+| 迭代 | 时间 t | 动作状态 | 说明 |
+|------|--------|----------|------|
+| 0 | 0.0 | 纯噪声 | 随机初始化 |
+| 1 | 0.1 | 噪声+轻微结构 | 开始去噪 |
+| 5 | 0.5 | 半结构化 | 动作轮廓显现 |
+| 9 | 0.9 | 接近真实 | 几乎完全去噪 |
+
+#### 步骤4: 返回最终动作
+
+```python
+return BatchFeature(data={
+    "action_pred": actions,           # [B, 16, 29] 归一化相对动作
+    "backbone_features": vl_embeds,
+    "state_features": state_features,
+})
+```
+
+### 11.3 推理输出样例
+
+假设 `num_inference_timesteps=10`, `action_horizon=16`, `action_dim=29`:
+
+```python
+# 输入
+backbone_features: torch.Size([1, 1024, 512])  # VLM 输出
+state_features: torch.Size([1, 1, 512])        # 编码后状态
+embodiment_id: torch.Size([1])                 # 值=10
+
+# 输出
+action_pred: torch.Size([1, 16, 29])           # 归一化相对动作
+# 值范围：[-1, 1] 左右（取决于归一化方式）
+# 前6维有效，后23维为 padding（接近0）
+
+# 实际数值示例
+action_pred[0, :3, :6]:  # 前3个时间步，前6个关节
+tensor([
+    [ 0.1234, -0.5678,  0.2345,  0.1111, -0.3333,  0.4567],  # t=0
+    [ 0.1345, -0.4567,  0.1234,  0.2222, -0.2222,  0.3456],  # t=1
+    [ 0.1456, -0.3456,  0.0123,  0.3333, -0.1111,  0.2345],  # t=2
+], dtype=torch.bfloat16)
+```
+
+---
+
+## 12. 动作解码：从归一化到物理单位
+
+### 12.1 decode_action 的作用
+
+**目标**: 将模型输出的归一化相对动作，转换为机器人可执行的绝对动作（物理单位）。
+
+代码位置：[`processing_gr00t_n1d6.py#L351-377`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/model/gr00t_n1d6/processing_gr00t_n1d6.py#L351-L377)
+
+```python
+def decode_action(
+    self,
+    action: np.ndarray,                    # [B, 16, 29] 归一化相对动作
+    embodiment_tag: EmbodimentTag,         # 本体标签
+    state: dict[str, np.ndarray] | None,   # 当前状态（用于还原绝对动作）
+) -> dict[str, np.ndarray]:
+```
+
+### 12.2 解码流程详解
+
+#### 步骤1: 拆分动作维度
+
+从统一维度的动作张量中，按关节组拆分：
+
+```python
+# 输入
+action: np.ndarray  # shape=(1, 16, 29)
+
+# 拆分逻辑
+out_dict = {}
+start_idx = 0
+joint_groups = ["shoulder_pan.pos", "shoulder_lift.pos", ..., "gripper.pos"]
+
+for key in joint_groups:
+    joint_dim = 1  # 每个关节 1 维
+    out_dict[key] = action[..., :action_horizon, start_idx:start_idx+joint_dim]
+    start_idx += joint_dim
+
+# 输出
+out_dict = {
+    "shoulder_pan.pos": array([[[-0.1234], [-0.1345], ..., [-0.1726]]]),  # (1, 16, 1)
+    "shoulder_lift.pos": array([[[ 0.5678], [ 0.4567], ..., [-0.2072]]]),  # (1, 16, 1)
+    "elbow_flex.pos":    array([[[-0.2345], [-0.1234], ..., [ 0.0460]]]),  # (1, 16, 1)
+    "wrist_flex.pos":    array([[[-0.1111], [-0.2222], ..., [ 0.3608]]]),  # (1, 16, 1)
+    "wrist_roll.pos":    array([[[ 0.3333], [ 0.2222], ..., [-0.2215]]]),  # (1, 16, 1)
+    "gripper.pos":       array([[[-0.4567], [-0.3456], ..., [-0.2553]]]),  # (1, 16, 1)
+}
+```
+
+**拆分后的结构**:
+- 每个关节独立存储
+- shape: `(B, action_horizon, joint_dim)`
+- 仍然是归一化空间，仍然是相对动作
+
+#### 步骤2: 调用 StateActionProcessor 反处理
+
+代码位置：[`gr00t_policy.py#L496-501`](file:///c:/Users/owen/Documents/VsCode/Isaac-GR00T/Isaac-GR00T/gr00t/policy/gr00t_policy.py#L496-L501)
+
+```python
+# 准备状态数据（用于还原绝对动作）
+batched_states = {}
+for k in modality_configs["state"].modality_keys:
+    batched_states[k] = np.stack([s[k] for s in states], axis=0)
+
+# batched_states 示例
+batched_states = {
+    "shoulder_pan.pos": array([[[1.2345]]]),   # (B, T_state, D) = (1, 1, 1)
+    "shoulder_lift.pos": array([[[-0.8765]]]),
+    "elbow_flex.pos":    array([[[0.4321]]]),
+    "wrist_flex.pos":    array([[[0.1234]]]),
+    "wrist_roll.pos":    array([[[0.5678]]]),
+    "gripper.pos":       array([[[0.0123]]]),
+}
+
+# 调用反归一化 + 相对→绝对
+unnormalized_action = self.processor.decode_action(
+    normalized_action.cpu().numpy(),  # [1, 16, 29]
+    self.embodiment_tag,
+    batched_states
+)
+```
+
+**StateActionProcessor.unapply_action 内部流程**:
+
+参考文档第3.2节，反向操作分两步：
+
+```python
+# Step 1: 反归一化（使用相对动作统计量）
+action_relative = (normalized_action + 1) / 2 * (max - min) + min
+
+# Step 2: 相对动作转绝对动作
+action_absolute = action_relative + state[-1]  # 加上当前状态
+```
+
+### 12.3 解码输出样例
+
+#### 输入
+
+```python
+# 归一化相对动作（来自模型）
+normalized_action: np.ndarray
+  shape: (1, 16, 29)
+  dtype: float32
+  range: [-1, 1] 左右
+  前6维有效，后23维padding
+
+# 当前状态（来自环境）
+batched_states: dict
+  "shoulder_pan.pos": array([[[1.2345]]])  # 弧度
+  "shoulder_lift.pos": array([[[-0.8765]]])
+  ...
+```
+
+#### 输出
+
+```python
+unnormalized_action: dict = {
+    "shoulder_pan.pos": array([
+        [[1.3579], [1.4813], [1.6047], ..., [1.9823]],  # (1, 16, 1)
+    ], dtype=float32),
+    "shoulder_lift.pos": array([
+        [[-0.3087], [-0.2198], [-0.1309], ..., [0.1352]],
+    ], dtype=float32),
+    "elbow_flex.pos": array([
+        [[0.1976], [0.3087], [0.4198], ..., [0.9087]],
+    ], dtype=float32),
+    "wrist_flex.pos": array([
+        [[0.2468], [0.3702], [0.4936], ..., [0.8638]],
+    ], dtype=float32),
+    "wrist_roll.pos": array([
+        [[0.9011], [1.0245], [1.1479], ..., [1.5255]],
+    ], dtype=float32),
+    "gripper.pos": array([
+        [[-0.4444], [-0.3333], [-0.2222], ..., [0.2444]],
+    ], dtype=float32),
+}
+```
+
+**关键特征**:
+- **单位**: 物理单位（弧度 rad, 或米 m）
+- **绝对值**: 可直接发送给机器人执行
+- **时间序列**: 16步未来轨迹
+- **维度**: 每个关节独立，shape=(1, 16, 1)
+
+### 12.4 完整推理流程总结
+
+```mermaid
+graph TD
+    A[VLM输入<br/>图像+文本] --> B[Eagle Backbone]
+    B --> C[backbone_features<br/>视觉语言特征]
+    D[当前状态<br/>state] --> E[State Encoder]
+    E --> F[state_features<br/>状态特征]
+    C --> G[Flow Matching<br/>ODE积分]
+    F --> G
+    G --> H[初始噪声<br/>x~N0,I]
+    H --> I[循环去噪<br/>10-50步]
+    I --> J[预测速度场<br/>vx,t]
+    J --> K[欧拉积分<br/>x+=dt*v]
+    K --> L{更多步?}
+    L -->|是| I
+    L -->|否| M[归一化相对动作<br/>shape=1,16,29]
+    M --> N[拆分关节组<br/>6个关节]
+    N --> O[反归一化<br/>min/max还原]
+    O --> P[相对→绝对<br/>+当前状态]
+    P --> Q[物理单位动作<br/>可执行轨迹]
+    Q --> R[机器人执行]
+```
+
+### 12.5 关键数值对比
+
+| 阶段 | 形状 | 值域 | 单位 | 说明 |
+|------|------|------|------|------|
+| **模型输出** | (1, 16, 29) | [-1, 1] | 无 | 归一化相对动作 |
+| **反归一化** | (1, 16, 6) | 依赖统计量 | 无 | 相对动作（物理尺度） |
+| **绝对动作** | (1, 16, 6) | 依赖状态 | rad/m | 可执行的轨迹 |
+
+**示例数值变化**:
+
+```python
+# 模型输出（归一化相对）
+normalized: 0.1234
+
+# 反归一化（相对，物理尺度）
+relative = (0.1234 + 1) / 2 * (1.5 - (-1.5)) + (-1.5)
+         = 0.6234 * 3.0 - 1.5
+         = 0.3702  # 弧度差
+
+# 转绝对（当前状态=1.2345）
+absolute = 0.3702 + 1.2345
+         = 1.6047  # 绝对关节角（弧度）
+```
+
+---
+
+**文档版本**: v1.2  
 **更新时间**: 2026-01-20  
 **测试代码**: `lerobot_hf/test_dataset.py`

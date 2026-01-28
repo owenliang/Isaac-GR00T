@@ -137,6 +137,19 @@ processor = Gr00tN1d6Processor(
 )
 processor.eval()
 # 交给processor转relative action、做state/action normalize
-messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
+messages=[{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
 processed_data = processor(messages)
-print(processed_data)
+# 把样本组成batch
+batch = processor.collator([processed_data])
+
+# 打印batch
+def recursive_print(x):
+    if isinstance(x,list):
+        return [recursive_print(i) for i in x]
+    elif isinstance(x,dict) or hasattr(x, "items"):
+        return {k: recursive_print(v) for k, v in x.items()}
+    elif isinstance(x,torch.Tensor):
+        return x.shape
+    else:
+        return x
+print(recursive_print(batch))
