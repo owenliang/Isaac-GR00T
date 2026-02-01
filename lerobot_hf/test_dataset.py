@@ -1,7 +1,7 @@
 import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 from gr00t.configs.base_config import get_default_config
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import torch
 from gr00t.data.dataset import lerobot_episode_loader
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
@@ -15,7 +15,6 @@ from gr00t.data.types import (
     ActionType,
     ModalityConfig,
     MessageType,
-    VLAStepData
 )
 from gr00t.configs.data.embodiment_configs import register_modality_config
 from gr00t.model.gr00t_n1d6.processing_gr00t_n1d6 import Gr00tN1d6Processor
